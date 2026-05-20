@@ -4,10 +4,16 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 import json
 from typing_extensions import Literal
+from src.agents.methodologies import load_methodology
 from src.tools.api import get_financial_metrics, get_market_cap, search_line_items
 from src.utils.llm import call_llm
 from src.utils.progress import progress
 from src.utils.api_key import get_api_key_from_state
+
+# Deep methodology (4 Filters, Owner Earnings, moat types, historical trades,
+# JP 商社 adaptation, failure case studies, 6-step decision checklist).
+# Loaded once at import; agent prompt is built each call.
+_BUFFETT_METHODOLOGY = load_methodology("warren_buffett")
 
 
 class WarrenBuffettSignal(BaseModel):
@@ -766,21 +772,23 @@ def generate_buffett_output(
         "margin_of_safety": analysis_data.get("margin_of_safety"),
     }
 
+    methodology_block = (
+        f"\n\nYour detailed investment methodology — study this carefully, "
+        f"your judgment MUST reflect these principles, historical trades and "
+        f"failure-case lessons. Pay special attention to the Japan section "
+        f"(商社 buy thesis, sectors where your style works/fails in JP):\n\n"
+        f"---\n{_BUFFETT_METHODOLOGY}\n---\n\n"
+        f"Apply the 4 Filters and 6-step decision checklist from the methodology "
+        f"above to the specific facts below.\n"
+    ) if _BUFFETT_METHODOLOGY else ""
+
     template = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
-                "You are Warren Buffett. Decide bullish, bearish, or neutral using only the provided facts.\n"
-                "\n"
-                "Checklist for decision:\n"
-                "- Circle of competence\n"
-                "- Competitive moat\n"
-                "- Management quality\n"
-                "- Financial strength\n"
-                "- Valuation vs intrinsic value\n"
-                "- Long-term prospects\n"
-                "\n"
-                "Signal rules:\n"
+                "You are Warren Buffett. Decide bullish, bearish, or neutral using only the provided facts."
+                + methodology_block +
+                "\nSignal rules:\n"
                 "- Bullish: strong business AND margin_of_safety > 0.\n"
                 "- Bearish: poor business OR clearly overvalued.\n"
                 "- Neutral: good business but margin_of_safety <= 0, or mixed evidence.\n"
@@ -792,7 +800,7 @@ def generate_buffett_output(
                 "- 30-49%: Outside my expertise or concerning fundamentals\n"
                 "- 10-29%: Poor business or significantly overvalued\n"
                 "\n"
-                "Keep reasoning under 120 characters. Do not invent data. Return JSON only."
+                "Keep reasoning under 200 characters (you may cite specific methodology principles like '4 Filters', 'Owner Earnings', 'MoS'). Do not invent data. Return JSON only."
             ),
             (
                 "human",

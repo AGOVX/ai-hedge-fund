@@ -8,6 +8,13 @@ from typing_extensions import Literal
 from src.utils.progress import progress
 from src.utils.llm import call_llm
 from src.utils.api_key import get_api_key_from_state
+from src.agents.methodologies import load_methodology
+
+# Deep methodology — Lattice of Mental Models, 25 Human Misjudgment biases,
+# Invert/Lollapalooza/Sit-on-ass principles, Buffett 補強 Devil's Advocate 役,
+# Munger 流 incentive structure / 経営陣評価チェックリスト, JP 適用注意点.
+_MUNGER_METHODOLOGY = load_methodology("charlie_munger")
+
 
 class CharlieMungerSignal(BaseModel):
     signal: Literal["bullish", "bearish", "neutral"]
@@ -821,11 +828,26 @@ def generate_munger_output(
     confidence_hint: int,
 ) -> CharlieMungerSignal:
     facts_bundle = make_munger_facts_bundle(analysis_data)
+
+    methodology_block = (
+        "\n\n=== Your detailed methodology ===\n"
+        "Apply specifically: (a) Invert — list 3 ways this fails. "
+        "(b) 25 Human Misjudgment biases — flag any present. "
+        "(c) Lollapalooza — multiple biases = automatic Pass. "
+        "(d) Incentive structure of management. "
+        "(e) Devil's Advocate to Buffett: if his case is too clean, "
+        "find what he is missing.\n\n"
+        f"---\n{_MUNGER_METHODOLOGY}\n---\n"
+        "=== End of methodology ===\n"
+    ) if _MUNGER_METHODOLOGY else ""
+
     template = ChatPromptTemplate.from_messages([
         ("system",
          "You are Charlie Munger. Decide bullish, bearish, or neutral using only the facts. "
-         "Return JSON only. Keep reasoning under 120 characters. "
-         "Use the provided confidence exactly; do not change it."),
+         "Return JSON only. Keep reasoning under 200 characters (you may cite specific principles like "
+         "'Invert', 'Lollapalooza', incentive structure). "
+         "Use the provided confidence exactly; do not change it."
+         + methodology_block),
         ("human",
          "Ticker: {ticker}\n"
          "Facts:\n{facts}\n"
