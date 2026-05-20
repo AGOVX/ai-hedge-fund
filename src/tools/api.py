@@ -21,6 +21,15 @@ from src.data.models import (
     InsiderTradeResponse,
     CompanyFactsResponse,
 )
+from src.tools.jp_data import (
+    get_company_news_jp,
+    get_financial_metrics_jp,
+    get_insider_trades_jp,
+    get_market_cap_jp,
+    get_prices_jp,
+    is_jp_ticker,
+    search_line_items_jp,
+)
 
 # Global cache instance
 _cache = get_cache()
@@ -64,10 +73,17 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
     """Fetch price data from cache or API."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{start_date}_{end_date}"
-    
+
     # Check cache first - simple exact match
     if cached_data := _cache.get_prices(cache_key):
         return [Price(**price) for price in cached_data]
+
+    # Route JP tickers (4-digit) to yfinance / J-Quants adapter
+    if is_jp_ticker(ticker):
+        prices = get_prices_jp(ticker, start_date, end_date)
+        if prices:
+            _cache.set_prices(cache_key, [p.model_dump() for p in prices])
+        return prices
 
     # If not in cache, fetch from API
     headers = {}
@@ -106,10 +122,17 @@ def get_financial_metrics(
     """Fetch financial metrics from cache or API."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{period}_{end_date}_{limit}"
-    
+
     # Check cache first - simple exact match
     if cached_data := _cache.get_financial_metrics(cache_key):
         return [FinancialMetrics(**metric) for metric in cached_data]
+
+    # Route JP tickers (4-digit) to yfinance / J-Quants adapter
+    if is_jp_ticker(ticker):
+        metrics = get_financial_metrics_jp(ticker, end_date, period=period, limit=limit)
+        if metrics:
+            _cache.set_financial_metrics(cache_key, [m.model_dump() for m in metrics])
+        return metrics
 
     # If not in cache, fetch from API
     headers = {}
@@ -147,6 +170,10 @@ def search_line_items(
     api_key: str = None,
 ) -> list[LineItem]:
     """Fetch line items from API."""
+    # Route JP tickers (4-digit) to EDINET adapter (stub in Phase 2.1)
+    if is_jp_ticker(ticker):
+        return search_line_items_jp(ticker, line_items, end_date, period=period, limit=limit)
+
     # If not in cache or insufficient data, fetch from API
     headers = {}
     financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
@@ -190,10 +217,14 @@ def get_insider_trades(
     """Fetch insider trades from cache or API."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{start_date or 'none'}_{end_date}_{limit}"
-    
+
     # Check cache first - simple exact match
     if cached_data := _cache.get_insider_trades(cache_key):
         return [InsiderTrade(**trade) for trade in cached_data]
+
+    # Route JP tickers (4-digit) to EDINET/TDnet adapter (stub in Phase 2.1)
+    if is_jp_ticker(ticker):
+        return get_insider_trades_jp(ticker, end_date, start_date=start_date, limit=limit)
 
     # If not in cache, fetch from API
     headers = {}
@@ -256,10 +287,14 @@ def get_company_news(
     """Fetch company news from cache or API."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{start_date or 'none'}_{end_date}_{limit}"
-    
+
     # Check cache first - simple exact match
     if cached_data := _cache.get_company_news(cache_key):
         return [CompanyNews(**news) for news in cached_data]
+
+    # Route JP tickers (4-digit) to TDnet adapter (stub in Phase 2.1)
+    if is_jp_ticker(ticker):
+        return get_company_news_jp(ticker, end_date, start_date=start_date, limit=limit)
 
     # If not in cache, fetch from API
     headers = {}
@@ -318,6 +353,10 @@ def get_market_cap(
     api_key: str = None,
 ) -> float | None:
     """Fetch market cap from the API."""
+    # Route JP tickers (4-digit) to yfinance / J-Quants adapter
+    if is_jp_ticker(ticker):
+        return get_market_cap_jp(ticker, end_date)
+
     # Check if end_date is today
     if end_date == datetime.datetime.now().strftime("%Y-%m-%d"):
         # Get the market cap from company facts API
