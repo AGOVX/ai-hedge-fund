@@ -83,11 +83,42 @@ _ACTION_DIRECTION = {
 }
 
 
-def _consensus_label(per_pm: list[dict]) -> str:
+_CONSENSUS_TYPE_LABEL = {
+    "strong": "Strong Consensus (全会一致 + 全員確信度 ≥ 50)",
+    "soft": "Soft Consensus (全会一致だが一部の確信度 < 50)",
+    "split": "Split (2方向に意見分裂)",
+    "diverged": "Diverged (3方向に意見分裂)",
+    "insufficient": "未評価 (PM 数 < 2)",
+}
+
+_DIRECTION_LABEL = {
+    "bullish": "Bullish",
+    "bearish": "Bearish",
+    "neutral": "Neutral",
+    "mixed": "Mixed",
+    "unknown": "Unknown",
+}
+
+
+def _consensus_label(per_pm: list[dict], cio_consensus: dict | None = None) -> str:
     """Return CIO-style consensus label.
 
-    Buckets: bullish / neutral / bearish; checks unanimity vs split.
+    Prefers the canonical CIO classification (Round 1.5 cio_consensus_agent)
+    when present; falls back to a local count-based label otherwise so this
+    function still works in unit tests that don't run the workflow.
     """
+    if cio_consensus and isinstance(cio_consensus, dict):
+        ctype = cio_consensus.get("type")
+        if ctype:
+            type_lbl = _CONSENSUS_TYPE_LABEL.get(ctype, ctype)
+            direction = cio_consensus.get("direction", "unknown")
+            dir_lbl = _DIRECTION_LABEL.get(direction, direction)
+            bull = cio_consensus.get("bullish", 0)
+            bear = cio_consensus.get("bearish", 0)
+            neu = cio_consensus.get("neutral", 0)
+            return f"{type_lbl} — {dir_lbl} ({bull} Bull / {neu} Neutral / {bear} Bear)"
+
+    # Fallback (no Round 1.5 result available)
     sigs = [p["signal"] for p in per_pm]
     if not sigs:
         return "未評価"
@@ -95,21 +126,18 @@ def _consensus_label(per_pm: list[dict]) -> str:
     bearish = sigs.count("bearish")
     neutral = sigs.count("neutral")
     total = len(sigs)
-    # Unanimous
     if bullish == total:
         return "Strong Consensus: 全会一致 Bullish"
     if bearish == total:
         return "Strong Consensus: 全会一致 Bearish"
     if neutral == total:
         return "Strong Consensus: 全会一致 Neutral"
-    # Majority
     if bullish > bearish and bullish > neutral:
         return f"Majority Bullish ({bullish}/{total})"
     if bearish > bullish and bearish > neutral:
         return f"Majority Bearish ({bearish}/{total})"
     if neutral > bullish and neutral > bearish:
         return f"Majority Neutral ({neutral}/{total})"
-    # No clear majority
     return f"Split ({bullish} Bull / {neutral} Neutral / {bearish} Bear)"
 
 
@@ -183,6 +211,7 @@ def format_report(
     now = datetime.now().astimezone()
     decision = (result.get("decisions") or {}).get(ticker, {})
     signals = result.get("analyst_signals") or {}
+    cio_consensus = (result.get("consensus") or {}).get(ticker)
 
     pm_agents = _pm_agent_names()
     per_pm_signals = []
@@ -259,9 +288,17 @@ def format_report(
     lines.append("")
 
     # Section 2: PM Consensus
-    lines.append("## 2. PM Consensus")
+    lines.append("## 2. PM Consensus (CIO Round 1.5)")
     lines.append("")
-    lines.append(f"**合意度**: {_consensus_label(per_pm_signals)}")
+    lines.append(f"**合意度**: {_consensus_label(per_pm_signals, cio_consensus)}")
+    if cio_consensus:
+        conf_floor = cio_consensus.get("confidence_floor")
+        low_conf = cio_consensus.get("low_conf_pms") or []
+        if conf_floor is not None:
+            lines.append(f"**最低確信度**: {conf_floor:.0f}%")
+        if low_conf:
+            human_low = ", ".join(_human_agent_name(a) for a in low_conf)
+            lines.append(f"**低確信 PM (< 50%)**: {human_low}")
     lines.append("")
     if per_pm_signals:
         lines.append("| PM | 判断 | 確信度 | 根拠 |")

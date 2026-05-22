@@ -25,6 +25,54 @@ from src.utils.watchlist_update import (
 
 # ---------------- Pure helpers ----------------
 
+class TestConsensusLabelWithCioInput:
+    """When CIO Round 1.5 consensus dict is provided, prefer its classification."""
+
+    def test_strong_consensus_format(self):
+        cio = {
+            "type": "strong", "direction": "bullish",
+            "pm_count": 3, "bullish": 3, "bearish": 0, "neutral": 0,
+            "confidence_floor": 70, "low_conf_pms": [],
+        }
+        label = _consensus_label([{"signal": "bullish"}] * 3, cio_consensus=cio)
+        assert "Strong Consensus" in label
+        assert "Bullish" in label
+        assert "(3 Bull / 0 Neutral / 0 Bear)" in label
+
+    def test_split_neutral_dominant(self):
+        cio = {
+            "type": "split", "direction": "neutral",
+            "pm_count": 3, "bullish": 0, "bearish": 1, "neutral": 2,
+            "confidence_floor": 30, "low_conf_pms": ["charlie_munger_agent"],
+        }
+        label = _consensus_label([], cio_consensus=cio)
+        assert "Split" in label
+        assert "Neutral" in label
+
+    def test_soft_label_when_low_conf_present(self):
+        cio = {
+            "type": "soft", "direction": "bullish",
+            "pm_count": 3, "bullish": 3, "bearish": 0, "neutral": 0,
+            "confidence_floor": 30, "low_conf_pms": ["x_agent"],
+        }
+        label = _consensus_label([], cio_consensus=cio)
+        assert "Soft Consensus" in label
+
+    def test_diverged_label(self):
+        cio = {
+            "type": "diverged", "direction": "mixed",
+            "pm_count": 3, "bullish": 1, "bearish": 1, "neutral": 1,
+            "confidence_floor": 30, "low_conf_pms": [],
+        }
+        label = _consensus_label([], cio_consensus=cio)
+        assert "Diverged" in label
+
+    def test_none_falls_back_to_count_based(self):
+        # No CIO consensus -> use old count logic (backward compat)
+        label = _consensus_label([{"signal": "bullish"}] * 3, cio_consensus=None)
+        assert "Strong Consensus" in label and "Bullish" in label
+
+
 class TestConsensusLabel:
     def test_all_bullish(self):
         assert "全会一致 Bullish" in _consensus_label(
@@ -161,10 +209,30 @@ class TestFormatReport:
             "4751", "REC-X", sample_result,
             model_name="m", start_date="2026-04-01", end_date="2026-05-15",
         )
+        # Without consensus dict, falls back to count-based label
         assert "Majority Neutral" in text or "Split" in text
         assert "Warren Buffett" in text
         assert "Charlie Munger" in text
         assert "Stanley Druckenmiller" in text
+
+    def test_format_report_uses_cio_consensus_when_present(self, sample_result):
+        """When result['consensus'][ticker] exists, label reflects CIO classification."""
+        sample_result["consensus"] = {
+            "4751": {
+                "type": "split", "direction": "neutral",
+                "pm_count": 3, "bullish": 0, "bearish": 1, "neutral": 2,
+                "confidence_floor": 30, "low_conf_pms": ["charlie_munger_agent"],
+            }
+        }
+        text = format_report(
+            "4751", "REC-X", sample_result,
+            model_name="m", start_date="2026-04-01", end_date="2026-05-15",
+        )
+        assert "Split" in text
+        assert "CIO Round 1.5" in text  # section header
+        assert "最低確信度" in text
+        assert "30%" in text
+        assert "Charlie Munger" in text  # listed as low-conf PM
 
     def test_risk_check_table(self, sample_result):
         text = format_report(
