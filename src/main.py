@@ -12,6 +12,14 @@ from src.utils.display import print_trading_output
 from src.utils.analysts import ANALYST_ORDER, get_analyst_nodes
 from src.utils.progress import progress
 from src.utils.visualize import save_graph_as_png
+from src.utils.recommendation_report import (
+    emit_reports_for_run,
+    next_rec_id,
+    format_report,
+    save_report,
+    _resolve_reports_dir,
+)
+from src.utils.watchlist_update import update_watchlist_for_run
 from src.cli.input import (
     parse_cli_inputs,
 )
@@ -177,3 +185,35 @@ if __name__ == "__main__":
         model_provider=inputs.model_provider,
     )
     print_trading_output(result)
+
+    # -- JP-fork extension: emit REC-YYYYMMDD-NNN-{ticker}.md per ticker, then update watchlist --
+    try:
+        from datetime import datetime as _dt
+        out_dir = _resolve_reports_dir()
+        rec_id_map: dict[str, str] = {}
+        saved_paths: list[str] = []
+        for ticker in tickers:
+            rec_id = next_rec_id(out_dir, on_date=_dt.now())
+            rec_id_map[ticker] = rec_id
+            text = format_report(
+                ticker=ticker,
+                rec_id=rec_id,
+                result=result,
+                model_name=inputs.model_name,
+                start_date=inputs.start_date,
+                end_date=inputs.end_date,
+            )
+            path = save_report(text, rec_id, ticker, out_dir)
+            saved_paths.append(str(path))
+        if saved_paths:
+            print()
+            print("REC reports written:")
+            for p in saved_paths:
+                print(f"  - {p}")
+        wl_paths = update_watchlist_for_run(
+            result, tickers=list(tickers), rec_id_map=rec_id_map
+        )
+        for wp in wl_paths:
+            print(f"Watch List updated: {wp}")
+    except Exception as e:
+        print(f"\n[WARN] REC/watchlist generation failed: {type(e).__name__}: {e}")

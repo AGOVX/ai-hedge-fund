@@ -28,5 +28,25 @@
     "display_name": "Gemini 3.1 Pro",
     "model_name": "gemini-3.1-pro-preview",
     "provider": "Google"
+  },
+  {
+    "display_name": "Qwen 2.5 72B (OpenRouter)",
+    "model_name": "qwen/qwen-2.5-72b-instruct",
+    "provider": "OpenRouter"
+  },
+  {
+    "display_name": "Llama 3.3 70B (OpenRouter)",
+    "model_name": "meta-llama/llama-3.3-70b-instruct",
+    "provider": "OpenRouter"
+  },
+  {
+    "display_name": "Claude 3.5 Haiku (OpenRouter)",
+    "model_name": "anthropic/claude-3.5-haiku",
+    "provider": "OpenRouter"
+  },
+  {
+    "display_name": "Gemini 2.0 Flash (OpenRouter)",
+    "model_name": "google/gemini-2.0-flash-001",
+    "provider": "OpenRouter"
   }
 ]

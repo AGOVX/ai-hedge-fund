@@ -488,7 +488,7 @@ class OllamaService:
     
     def _load_models_from_file(self, models_path: Path) -> List[Dict[str, str]]:
         """Load models from JSON file."""
-        with open(models_path, 'r') as f:
+        with open(models_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     
     def _get_fallback_models(self) -> List[Dict[str, str]]:
