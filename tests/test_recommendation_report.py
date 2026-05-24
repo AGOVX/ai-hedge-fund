@@ -215,6 +215,99 @@ class TestFormatReport:
         assert "Charlie Munger" in text
         assert "Stanley Druckenmiller" in text
 
+    def test_format_report_renders_devils_advocate_when_present(self, sample_result):
+        """When the CIO consensus dict carries a devils_advocate sub-block,
+        the report must surface it with verdict + 3 counter-arguments + PM
+        assessment table."""
+        sample_result["consensus"] = {
+            "4751": {
+                "type": "strong", "direction": "bullish",
+                "pm_count": 3, "bullish": 3, "bearish": 0, "neutral": 0,
+                "confidence_floor": 70, "low_conf_pms": [],
+                "devils_advocate": {
+                    "counter_arguments": [
+                        {"angle": "moat fragility",
+                         "challenge": "What if AWS-style hyperscaler disrupts the ad inventory?",
+                         "if_true_then": "Ad-tech margins compress 40%+"},
+                        {"angle": "macro pivot",
+                         "challenge": "BOJ surprise hike could re-rate growth multiples.",
+                         "if_true_then": "PER compresses from 16x to 10x"},
+                        {"angle": "valuation",
+                         "challenge": "Current PBR 3.5x prices in 5 years of perfect execution.",
+                         "if_true_then": "Margin of safety effectively zero"},
+                    ],
+                    "pm_assessments": [
+                        {"agent": "warren_buffett_agent", "is_likely_to_hold": True,
+                         "confidence_change_estimate": -5, "rationale": "DCF accommodates -40% margin shock"},
+                        {"agent": "charlie_munger_agent", "is_likely_to_hold": False,
+                         "confidence_change_estimate": -25, "rationale": "Has not explicitly modeled hyperscaler entry"},
+                    ],
+                    "consensus_survives": True,
+                    "survival_rationale": "Majority of PMs hold; deltas stay within tolerance.",
+                    "recommended_next_step": "proceed",
+                },
+            }
+        }
+        text = format_report(
+            "4751", "REC-X", sample_result,
+            model_name="m", start_date="2026-04-01", end_date="2026-05-15",
+        )
+        assert "Devil's Advocate" in text
+        assert "Strong Consensus 確定" in text  # consensus_survives=True
+        assert "Majority of PMs hold" in text  # survival_rationale
+        assert "proceed" in text  # recommended_next_step
+        # All 3 counter-arguments rendered with their angle labels
+        assert "moat fragility" in text
+        assert "macro pivot" in text
+        assert "valuation" in text
+        # PM assessment table includes both PMs with their delta
+        assert "Warren Buffett" in text
+        assert "Charlie Munger" in text
+        assert "-5" in text  # delta formatted
+        assert "-25" in text
+
+    def test_format_report_da_failure_triggers_round2_label(self, sample_result):
+        """When consensus_survives is False the report shows 'Round 2 要請'."""
+        sample_result["consensus"] = {
+            "4751": {
+                "type": "strong", "direction": "bullish",
+                "pm_count": 3, "bullish": 3, "bearish": 0, "neutral": 0,
+                "confidence_floor": 70, "low_conf_pms": [],
+                "devils_advocate": {
+                    "counter_arguments": [
+                        {"angle": "x", "challenge": "c", "if_true_then": "t"},
+                    ] * 3,
+                    "pm_assessments": [],
+                    "consensus_survives": False,
+                    "survival_rationale": "Buffett would lose 40 conf points.",
+                    "recommended_next_step": "trigger_round2",
+                },
+            }
+        }
+        text = format_report(
+            "4751", "REC-X", sample_result,
+            model_name="m", start_date="2026-04-01", end_date="2026-05-15",
+        )
+        assert "Round 2 要請" in text
+        assert "trigger_round2" in text
+
+    def test_format_report_no_da_section_when_consensus_not_strong(self, sample_result):
+        """Non-strong consensus must NOT have a Devil's Advocate section in
+        the report (DA didn't run)."""
+        sample_result["consensus"] = {
+            "4751": {
+                "type": "split", "direction": "neutral",
+                "pm_count": 3, "bullish": 0, "bearish": 1, "neutral": 2,
+                "confidence_floor": 30, "low_conf_pms": [],
+                # no 'devils_advocate' key
+            }
+        }
+        text = format_report(
+            "4751", "REC-X", sample_result,
+            model_name="m", start_date="2026-04-01", end_date="2026-05-15",
+        )
+        assert "Devil's Advocate" not in text
+
     def test_format_report_uses_cio_consensus_when_present(self, sample_result):
         """When result['consensus'][ticker] exists, label reflects CIO classification."""
         from src.agents.cio_consensus import CONFIDENCE_FLOOR
