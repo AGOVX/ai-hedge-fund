@@ -291,6 +291,60 @@ class TestFormatReport:
         assert "Round 2 要請" in text
         assert "trigger_round2" in text
 
+    def test_format_report_renders_round2_qa_section(self, sample_result):
+        """When round2a / round2b are present in the result, the report must
+        surface a '2.5 Round 2 Q&A' section with Q -> A threads."""
+        sample_result["round2a"] = {
+            "4751": {
+                "warren_buffett_agent": {
+                    "questions": [
+                        {"target": "charlie_munger_agent",
+                         "question": "Which moat metric is insufficient?",
+                         "rationale": "Munger flagged moat data"}
+                    ],
+                    "self_note": "",
+                }
+            }
+        }
+        sample_result["round2b"] = {
+            "4751": {
+                "charlie_munger_agent": {
+                    "answers": [
+                        {"asker": "warren_buffett_agent",
+                         "question": "Which moat metric is insufficient?",
+                         "answer": "ROIC 10-year consistency, EDINET data missing.",
+                         "view_changed": "partial",
+                         "change_note": "lower confidence by 10"}
+                    ]
+                }
+            }
+        }
+        text = format_report(
+            "4751", "REC-X", sample_result,
+            model_name="m", start_date="2026-04-01", end_date="2026-05-15",
+        )
+        assert "Round 2 Q&A" in text
+        # Asker -> target labels
+        assert "Warren Buffett からの質問" in text
+        assert "→ Charlie Munger" in text
+        # Question and answer text both present
+        assert "Which moat metric is insufficient" in text
+        assert "ROIC 10-year consistency" in text
+        # view_changed label rendered as the human label
+        assert "🔁 部分変更" in text
+        # change_note shown for partial
+        assert "lower confidence by 10" in text
+        # Summary count line present
+        assert "回答ラベル集計" in text
+
+    def test_format_report_no_round2_section_when_absent(self, sample_result):
+        """If round2a/round2b are missing from the result, no section appears."""
+        text = format_report(
+            "4751", "REC-X", sample_result,
+            model_name="m", start_date="2026-04-01", end_date="2026-05-15",
+        )
+        assert "Round 2 Q&A" not in text
+
     def test_format_report_no_da_section_when_consensus_not_strong(self, sample_result):
         """Non-strong consensus must NOT have a Devil's Advocate section even
         if a stale devils_advocate payload happens to be present (defense in

@@ -154,6 +154,79 @@ def _gov_warning_for_action(action: str) -> str | None:
     return None
 
 
+_VIEW_CHANGED_LABEL = {
+    "full": "🔄 全面変更",
+    "partial": "🔁 部分変更",
+    "no": "✋ 変化なし",
+    "cannot_answer": "❓ 答えられず",
+}
+
+
+def _format_round2_qa_section(round2a: dict, round2b: dict) -> str:
+    """Render the per-PM Round 2a questions and the corresponding Round 2b
+    answers in a single flowing Markdown block."""
+    blocks: list[str] = []
+    all_askers = sorted(set(round2a.keys()) | set(round2b.keys()))
+    if not all_askers:
+        return "(Round 2 was not triggered — consensus was either strong+proceed or insufficient.)"
+
+    # Group by asker so the reader can follow each PM's challenge thread
+    for asker in all_askers:
+        pm_2a = (round2a.get(asker) or {})
+        questions = pm_2a.get("questions") or []
+        self_note = (pm_2a.get("self_note") or "").strip()
+        if not questions and not self_note:
+            continue
+        blocks.append(f"### {_human_agent_name(asker)} からの質問")
+        if self_note:
+            blocks.append(f"_({self_note})_")
+        if not questions:
+            blocks.append("")
+            continue
+        for q in questions:
+            target = q.get("target", "?")
+            qtext = q.get("question", "")
+            blocks.append(f"- **→ {_human_agent_name(target)}**: {qtext}")
+            rationale = q.get("rationale")
+            if rationale:
+                blocks.append(f"  _Why: {rationale}_")
+            # Lookup the corresponding answer
+            answerer_payload = (round2b.get(target) or {})
+            matched_answer = None
+            for a in (answerer_payload.get("answers") or []):
+                if a.get("asker") == asker and a.get("question") == qtext:
+                    matched_answer = a
+                    break
+            if matched_answer:
+                vc = matched_answer.get("view_changed", "no")
+                vc_label = _VIEW_CHANGED_LABEL.get(vc, vc)
+                ans = matched_answer.get("answer", "")
+                blocks.append(f"  - **Answer ({vc_label})**: {ans}")
+                change_note = matched_answer.get("change_note")
+                if change_note and vc in {"full", "partial"}:
+                    blocks.append(f"    - 変更点: {change_note}")
+            else:
+                blocks.append(f"  - **Answer**: _(未回答)_")
+        blocks.append("")
+
+    # Summary: count view_changed labels across all answers
+    counts = {"full": 0, "partial": 0, "no": 0, "cannot_answer": 0}
+    for answerer_payload in round2b.values():
+        for a in (answerer_payload.get("answers") or []):
+            label = a.get("view_changed", "no")
+            if label in counts:
+                counts[label] += 1
+    total_answers = sum(counts.values())
+    if total_answers:
+        blocks.append("**回答ラベル集計**:")
+        blocks.append(
+            f"- 🔄 全面変更: {counts['full']} / 🔁 部分変更: {counts['partial']} / "
+            f"✋ 変化なし: {counts['no']} / ❓ 答えられず: {counts['cannot_answer']}"
+        )
+
+    return "\n".join(blocks).rstrip()
+
+
 def _format_per_pm_row(agent_name: str, sig: dict) -> str:
     sig_label = (sig.get("signal") or "?").upper()
     conf = sig.get("confidence")
@@ -214,6 +287,8 @@ def format_report(
     decision = (result.get("decisions") or {}).get(ticker, {})
     signals = result.get("analyst_signals") or {}
     cio_consensus = (result.get("consensus") or {}).get(ticker)
+    round2a = (result.get("round2a") or {}).get(ticker) or {}
+    round2b = (result.get("round2b") or {}).get(ticker) or {}
 
     pm_agents = _pm_agent_names()
     per_pm_signals = []
@@ -359,6 +434,13 @@ def format_report(
     else:
         lines.append("(PM 起動なし)")
     lines.append("")
+
+    # Section 2.5: Round 2 Q&A (only when round_2a / round_2b ran)
+    if round2a or round2b:
+        lines.append("## 2.5 Round 2 Q&A (議論プロトコル)")
+        lines.append("")
+        lines.append(_format_round2_qa_section(round2a, round2b))
+        lines.append("")
 
     # Section 3: 専門 Analyst
     if per_analyst_signals:
