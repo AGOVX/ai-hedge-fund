@@ -301,6 +301,55 @@ def format_report(
         if low_conf:
             human_low = ", ".join(_human_agent_name(a) for a in low_conf)
             lines.append(f"**低確信 PM (< {CONFIDENCE_FLOOR}%)**: {human_low}")
+
+        # Devil's Advocate sub-round (only displayed for strong consensus —
+        # defense in depth: even if a stale devils_advocate payload survives on
+        # a non-strong consensus dict, the report must not render it because
+        # the DA gate only fires when type=='strong').
+        da = cio_consensus.get("devils_advocate")
+        if da and cio_consensus.get("type") == "strong":
+            lines.append("")
+            lines.append("### Devil's Advocate (Groupthink Check)")
+            lines.append("")
+            survives = da.get("consensus_survives")
+            verdict = "✅ Strong Consensus 確定" if survives else "⚠️ Round 2 要請 (反論で合意が崩れる可能性)"
+            lines.append(f"**判定**: {verdict}")
+            rationale = da.get("survival_rationale")
+            if rationale:
+                lines.append(f"**判定根拠**: {rationale}")
+            next_step = da.get("recommended_next_step")
+            if next_step:
+                lines.append(f"**推奨次ステップ**: `{next_step}`")
+            counters = da.get("counter_arguments") or []
+            if counters:
+                lines.append("")
+                lines.append("**反対立場からの3つの反論**:")
+                for i, c in enumerate(counters, 1):
+                    angle = c.get("angle", "?")
+                    challenge = c.get("challenge", "")
+                    if_true = c.get("if_true_then", "")
+                    lines.append(f"{i}. **[{angle}]** {challenge}")
+                    if if_true:
+                        lines.append(f"   - もし正しければ → {if_true}")
+            pm_assessments = da.get("pm_assessments") or []
+            if pm_assessments:
+                lines.append("")
+                lines.append("**PM の説得耐性評価** (CIO 推定):")
+                lines.append("")
+                lines.append("| PM | 結論維持? | 想定確信度Δ | 理由 |")
+                lines.append("|---|---|---|---|")
+                for a in pm_assessments:
+                    agent_name = _human_agent_name(a.get("agent", "?"))
+                    hold = "維持" if a.get("is_likely_to_hold") else "揺らぐ"
+                    delta = a.get("confidence_change_estimate", 0)
+                    # `:+d` only works for ints — use `:+g` to handle both ints
+                    # and floats safely (Pydantic may coerce LLM outputs to
+                    # float in some configurations).
+                    delta_str = f"{delta:+g}" if isinstance(delta, (int, float)) else str(delta)
+                    reason = (a.get("rationale") or "").replace("|", "/").replace("\n", " ")
+                    if len(reason) > 150:
+                        reason = reason[:147] + "..."
+                    lines.append(f"| {agent_name} | {hold} | {delta_str} | {reason} |")
     lines.append("")
     if per_pm_signals:
         lines.append("| PM | 判断 | 確信度 | 根拠 |")
