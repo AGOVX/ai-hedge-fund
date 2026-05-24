@@ -292,14 +292,27 @@ class TestFormatReport:
         assert "trigger_round2" in text
 
     def test_format_report_no_da_section_when_consensus_not_strong(self, sample_result):
-        """Non-strong consensus must NOT have a Devil's Advocate section in
-        the report (DA didn't run)."""
+        """Non-strong consensus must NOT have a Devil's Advocate section even
+        if a stale devils_advocate payload happens to be present (defense in
+        depth against state bleed between runs / cached fixtures)."""
         sample_result["consensus"] = {
             "4751": {
                 "type": "split", "direction": "neutral",
                 "pm_count": 3, "bullish": 0, "bearish": 1, "neutral": 2,
                 "confidence_floor": 30, "low_conf_pms": [],
-                # no 'devils_advocate' key
+                # Stale DA payload: must be suppressed by the gate
+                "devils_advocate": {
+                    "counter_arguments": [
+                        {"angle": "x", "challenge": "stale", "if_true_then": "t"}
+                    ] * 3,
+                    "pm_assessments": [
+                        {"agent": "warren_buffett_agent", "is_likely_to_hold": True,
+                         "confidence_change_estimate": 0, "rationale": "stale"},
+                    ],
+                    "consensus_survives": True,
+                    "survival_rationale": "stale payload — must not render",
+                    "recommended_next_step": "proceed",
+                },
             }
         }
         text = format_report(
@@ -307,6 +320,40 @@ class TestFormatReport:
             model_name="m", start_date="2026-04-01", end_date="2026-05-15",
         )
         assert "Devil's Advocate" not in text
+        assert "stale" not in text
+        assert "Strong Consensus 確定" not in text
+
+    def test_format_report_da_table_handles_float_delta(self, sample_result):
+        """A float confidence_change_estimate must format without raising
+        TypeError (`:+d` would crash on float; we use `:+g` instead)."""
+        sample_result["consensus"] = {
+            "4751": {
+                "type": "strong", "direction": "bullish",
+                "pm_count": 3, "bullish": 3, "bearish": 0, "neutral": 0,
+                "confidence_floor": 70, "low_conf_pms": [],
+                "devils_advocate": {
+                    "counter_arguments": [
+                        {"angle": "x", "challenge": "c", "if_true_then": "t"}
+                    ] * 3,
+                    "pm_assessments": [
+                        {"agent": "warren_buffett_agent", "is_likely_to_hold": True,
+                         "confidence_change_estimate": -5.5, "rationale": "float delta"},
+                        {"agent": "charlie_munger_agent", "is_likely_to_hold": False,
+                         "confidence_change_estimate": 12.0, "rationale": "another float"},
+                    ],
+                    "consensus_survives": True,
+                    "survival_rationale": "ok",
+                    "recommended_next_step": "proceed",
+                },
+            }
+        }
+        text = format_report(
+            "4751", "REC-X", sample_result,
+            model_name="m", start_date="2026-04-01", end_date="2026-05-15",
+        )
+        # `:+g` renders -5.5 as "-5.5" and 12.0 as "+12"
+        assert "-5.5" in text
+        assert "+12" in text
 
     def test_format_report_uses_cio_consensus_when_present(self, sample_result):
         """When result['consensus'][ticker] exists, label reflects CIO classification."""

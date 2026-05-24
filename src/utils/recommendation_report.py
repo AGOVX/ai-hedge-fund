@@ -302,9 +302,12 @@ def format_report(
             human_low = ", ".join(_human_agent_name(a) for a in low_conf)
             lines.append(f"**低確信 PM (< {CONFIDENCE_FLOOR}%)**: {human_low}")
 
-        # Devil's Advocate sub-round (only present for strong consensus)
+        # Devil's Advocate sub-round (only displayed for strong consensus —
+        # defense in depth: even if a stale devils_advocate payload survives on
+        # a non-strong consensus dict, the report must not render it because
+        # the DA gate only fires when type=='strong').
         da = cio_consensus.get("devils_advocate")
-        if da:
+        if da and cio_consensus.get("type") == "strong":
             lines.append("")
             lines.append("### Devil's Advocate (Groupthink Check)")
             lines.append("")
@@ -339,7 +342,10 @@ def format_report(
                     agent_name = _human_agent_name(a.get("agent", "?"))
                     hold = "維持" if a.get("is_likely_to_hold") else "揺らぐ"
                     delta = a.get("confidence_change_estimate", 0)
-                    delta_str = f"{delta:+d}" if isinstance(delta, (int, float)) else str(delta)
+                    # `:+d` only works for ints — use `:+g` to handle both ints
+                    # and floats safely (Pydantic may coerce LLM outputs to
+                    # float in some configurations).
+                    delta_str = f"{delta:+g}" if isinstance(delta, (int, float)) else str(delta)
                     reason = (a.get("rationale") or "").replace("|", "/").replace("\n", " ")
                     if len(reason) > 150:
                         reason = reason[:147] + "..."
