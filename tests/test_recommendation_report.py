@@ -217,6 +217,8 @@ class TestFormatReport:
 
     def test_format_report_uses_cio_consensus_when_present(self, sample_result):
         """When result['consensus'][ticker] exists, label reflects CIO classification."""
+        from src.agents.cio_consensus import CONFIDENCE_FLOOR
+
         sample_result["consensus"] = {
             "4751": {
                 "type": "split", "direction": "neutral",
@@ -233,6 +235,9 @@ class TestFormatReport:
         assert "最低確信度" in text
         assert "30%" in text
         assert "Charlie Munger" in text  # listed as low-conf PM
+        # Threshold label uses the canonical CONFIDENCE_FLOOR constant — guards
+        # against silent drift between the classifier and the report.
+        assert f"低確信 PM (< {CONFIDENCE_FLOOR}%)" in text
 
     def test_risk_check_table(self, sample_result):
         text = format_report(

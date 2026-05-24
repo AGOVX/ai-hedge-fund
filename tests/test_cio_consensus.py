@@ -88,6 +88,71 @@ class TestClassifyStrong:
         assert out["direction"] == "neutral"
 
 
+class TestClassifyMalformedInputs:
+    """Regression tests for invalid PM payloads — must never crash and must
+    never silently corrupt vote counts."""
+
+    def test_invalid_signal_label_is_excluded(self):
+        """A PM that returns a non-standard signal label like 'upwards' should
+        be excluded from voting, not silently miscounted."""
+        per_pm = [
+            {"agent": "warren_buffett_agent", "signal": "bullish", "confidence": 80, "reasoning": "x"},
+            {"agent": "charlie_munger_agent", "signal": "bullish", "confidence": 70, "reasoning": "y"},
+            {"agent": "stanley_druckenmiller_agent", "signal": "upwards", "confidence": 65, "reasoning": "z"},
+        ]
+        out = _classify(per_pm)
+        # The 2 valid bullish votes still form a unanimous "strong" consensus
+        assert out["type"] == "strong"
+        assert out["direction"] == "bullish"
+        assert out["pm_count"] == 2  # excluded vote is not counted
+        assert out["bullish"] == 2
+        # Excluded agent recorded for debugging
+        assert "stanley_druckenmiller_agent" in out["excluded_pms"]
+
+    def test_non_numeric_confidence_is_excluded(self):
+        """A PM with confidence=None or string is invalid and must not affect
+        confidence_floor or low_conf_pms calculations."""
+        per_pm = [
+            {"agent": "warren_buffett_agent", "signal": "bullish", "confidence": 80, "reasoning": "x"},
+            {"agent": "charlie_munger_agent", "signal": "bullish", "confidence": 70, "reasoning": "y"},
+            {"agent": "broken_agent", "signal": "bullish", "confidence": None, "reasoning": "z"},
+        ]
+        out = _classify(per_pm)
+        assert out["type"] == "strong"
+        assert out["direction"] == "bullish"
+        assert out["pm_count"] == 2
+        assert out["confidence_floor"] == 70  # min of {80, 70}, not affected by None
+        assert out["low_conf_pms"] == []
+        assert "broken_agent" in out["excluded_pms"]
+
+    def test_all_invalid_signals_yields_insufficient(self):
+        """If every PM returned garbage, classification falls back to
+        'insufficient' rather than producing a misleading 'diverged'."""
+        per_pm = [
+            {"agent": "a", "signal": "MAYBE", "confidence": 50, "reasoning": "x"},
+            {"agent": "b", "signal": "upwards", "confidence": 60, "reasoning": "y"},
+        ]
+        out = _classify(per_pm)
+        assert out["type"] == "insufficient"
+        assert out["pm_count"] == 0
+        assert len(out["excluded_pms"]) == 2
+
+    def test_classify_does_not_raise_on_missing_fields(self):
+        """Defensive: dict missing 'signal' or 'confidence' must be safely excluded."""
+        per_pm = [
+            {"agent": "ok_agent", "signal": "bullish", "confidence": 80, "reasoning": "x"},
+            {"agent": "ok_agent_2", "signal": "bullish", "confidence": 60, "reasoning": "y"},
+            {"agent": "no_signal"},
+            {"agent": "no_conf", "signal": "bearish"},
+        ]
+        out = _classify(per_pm)
+        # 2 valid bullish votes -> strong
+        assert out["type"] == "strong"
+        assert out["direction"] == "bullish"
+        assert "no_signal" in out["excluded_pms"]
+        assert "no_conf" in out["excluded_pms"]
+
+
 class TestClassifySoft:
     def test_all_same_with_low_conf_pm(self):
         per_pm = [

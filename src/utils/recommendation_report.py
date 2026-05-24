@@ -27,6 +27,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from src.agents.cio_consensus import CONFIDENCE_FLOOR
+
 logger = logging.getLogger(__name__)
 
 
@@ -298,7 +300,7 @@ def format_report(
             lines.append(f"**最低確信度**: {conf_floor:.0f}%")
         if low_conf:
             human_low = ", ".join(_human_agent_name(a) for a in low_conf)
-            lines.append(f"**低確信 PM (< 50%)**: {human_low}")
+            lines.append(f"**低確信 PM (< {CONFIDENCE_FLOOR}%)**: {human_low}")
     lines.append("")
     if per_pm_signals:
         lines.append("| PM | 判断 | 確信度 | 根拠 |")
