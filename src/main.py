@@ -8,6 +8,8 @@ import questionary
 from src.agents.cio_consensus import cio_consensus_agent
 from src.agents.devils_advocate import devils_advocate_agent
 from src.agents.portfolio_manager import portfolio_management_agent
+from src.agents.round_2a_questions import round_2a_questions_agent
+from src.agents.round_2b_answers import round_2b_answers_agent
 from src.agents.risk_manager import risk_management_agent
 from src.graph.state import AgentState
 from src.utils.display import print_trading_output
@@ -97,6 +99,8 @@ def run_hedge_fund(
             "decisions": parse_hedge_fund_response(final_state["messages"][-1].content),
             "analyst_signals": final_state["data"]["analyst_signals"],
             "consensus": final_state["data"].get("consensus", {}),
+            "round2a": final_state["data"].get("round2a", {}),
+            "round2b": final_state["data"].get("round2b", {}),
         }
     finally:
         # Stop progress tracking
@@ -131,6 +135,11 @@ def create_workflow(selected_analysts=None):
     # Add Devil's Advocate sub-round (no-op for non-strong consensus tickers)
     workflow.add_node("devils_advocate_agent", devils_advocate_agent)
 
+    # Add Round 2a / 2b Q&A nodes (per-PM LLM calls; skipped when not needed
+    # per should_run_round2 — strong+proceed and insufficient are no-ops)
+    workflow.add_node("round_2a_questions_agent", round_2a_questions_agent)
+    workflow.add_node("round_2b_answers_agent", round_2b_answers_agent)
+
     # Always add risk and portfolio management
     workflow.add_node("risk_management_agent", risk_management_agent)
     workflow.add_node("portfolio_manager", portfolio_management_agent)
@@ -140,8 +149,12 @@ def create_workflow(selected_analysts=None):
         node_name = analyst_nodes[analyst_key][0]
         workflow.add_edge(node_name, "cio_consensus_agent")
 
+    # cio_consensus -> devils_advocate (DA: strong-only) -> round_2a -> round_2b
+    # -> risk_management_agent -> portfolio_manager -> END
     workflow.add_edge("cio_consensus_agent", "devils_advocate_agent")
-    workflow.add_edge("devils_advocate_agent", "risk_management_agent")
+    workflow.add_edge("devils_advocate_agent", "round_2a_questions_agent")
+    workflow.add_edge("round_2a_questions_agent", "round_2b_answers_agent")
+    workflow.add_edge("round_2b_answers_agent", "risk_management_agent")
     workflow.add_edge("risk_management_agent", "portfolio_manager")
     workflow.add_edge("portfolio_manager", END)
 
