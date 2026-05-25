@@ -206,7 +206,7 @@ def _format_round2_qa_section(round2a: dict, round2b: dict) -> str:
                 if change_note and vc in {"full", "partial"}:
                     blocks.append(f"    - 変更点: {change_note}")
             else:
-                blocks.append(f"  - **Answer**: _(未回答)_")
+                blocks.append("  - **Answer**: _(未回答)_")
         blocks.append("")
 
     # Summary: count view_changed labels across all answers
@@ -335,7 +335,7 @@ def format_report(
     lines.append(f"**有効期限**: {valid_until.strftime('%Y-%m-%d')}  ")
     lines.append(f"**分析期間**: {start_date} 〜 {end_date}  ")
     lines.append(f"**LLM モデル**: {model_name}  ")
-    lines.append(f"**フェーズ**: 学習・検証 (ペーパートレード) — **実弾発注なし**")
+    lines.append("**フェーズ**: 学習・検証 (ペーパートレード) — **実弾発注なし**")
     lines.append("")
 
     if gov_warning:
@@ -361,7 +361,7 @@ def format_report(
         lines.append(f"| 想定建玉金額 | ¥{position_value:,.0f} |")
     lines.append(f"| Portfolio Manager 判断 | **{_ACTION_LABEL.get(action, action.upper())}** |")
     lines.append(f"| 確信度 | {pm_confidence:.0f}% |" if isinstance(pm_confidence, (int, float)) else "| 確信度 | - |")
-    lines.append(f"| Stop / Time Stop | [株主決定] |")
+    lines.append("| Stop / Time Stop | [株主決定] |")
     lines.append("")
 
     # Section 2: PM Consensus

@@ -18,9 +18,9 @@ import logging
 
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
-from typing_extensions import Literal
 
 from src.agents.round2_common import (
+    ViewChangedLabel,
     get_round1_pms_for_ticker,
     methodology_block,
     persona_description,
@@ -41,7 +41,7 @@ class Round2bAnswer(BaseModel):
     asker: str = Field(description="Agent key of the asker, e.g. 'warren_buffett_agent'")
     question: str = Field(description="The original question text (verbatim from Round 2a)")
     answer: str = Field(description="The PM's answer in their own voice (<= 400 chars)")
-    view_changed: Literal["full", "partial", "no", "cannot_answer"] = Field(
+    view_changed: ViewChangedLabel = Field(
         description=(
             "'full' = Round 1 verdict reversed; 'partial' = nuance / confidence adjusted; "
             "'no' = answer doesn't change Round 1 stance; "
@@ -194,12 +194,15 @@ def _run_round2b_for_answerer(
     )
 
     if isinstance(signal, Round2bOutput):
-        # Defensive: ensure the answers cite real askers from addressed[]
-        valid_askers = {q["asker"] for q in addressed}
-        cleaned = [a for a in signal.answers if a.asker in valid_askers]
+        # Defensive: ensure each answer maps to an actually-addressed
+        # (asker, question) PAIR — not merely a valid asker. This blocks an
+        # LLM from pairing a real asker with a fabricated question.
+        addressed_pairs = {(q["asker"], q["question"]) for q in addressed}
+        cleaned = [a for a in signal.answers if (a.asker, a.question) in addressed_pairs]
         if len(cleaned) != len(signal.answers):
             logger.info(
-                "Round 2b: dropped %d answer(s) from %s that named unknown askers",
+                "Round 2b: dropped %d answer(s) from %s that did not match an "
+                "addressed (asker, question) pair",
                 len(signal.answers) - len(cleaned),
                 answerer_agent_key,
             )

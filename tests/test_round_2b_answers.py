@@ -227,6 +227,47 @@ class TestRound2bOutput:
                 assert a["asker"] != "cathie_wood_agent"
 
     @patch("src.agents.round_2b_answers.call_llm")
+    def test_drops_answer_with_valid_asker_but_fabricated_question(self, mock_call, state_with_r2a):
+        """An answer whose asker is real but whose question was never asked
+        must be dropped (validation is on the (asker, question) PAIR, not
+        merely the asker)."""
+        mock_call.return_value = Round2bOutput(
+            answers=[
+                # Real asker (warren_buffett) but a question he never sent to munger
+                Round2bAnswer(
+                    asker="warren_buffett_agent",
+                    question="A totally different question never asked",
+                    answer="should be dropped",
+                    view_changed="no",
+                ),
+            ]
+        )
+        result = round_2b_answers_agent(state_with_r2a)
+        for payload in result["data"]["round2b"]["4751"].values():
+            for a in payload.get("answers", []):
+                assert a["question"] != "A totally different question never asked"
+
+    @patch("src.agents.round_2b_answers.call_llm")
+    def test_keeps_answer_matching_addressed_pair(self, mock_call, state_with_r2a):
+        """An answer whose (asker, question) exactly matches an addressed pair
+        survives validation."""
+        mock_call.return_value = Round2bOutput(
+            answers=[
+                Round2bAnswer(
+                    asker="warren_buffett_agent",
+                    question="Which moat metric is insufficient?",  # exact addressed Q to munger
+                    answer="ROIC consistency.",
+                    view_changed="partial",
+                    change_note="lower confidence",
+                ),
+            ]
+        )
+        result = round_2b_answers_agent(state_with_r2a)
+        # charlie_munger_agent received this exact question -> answer survives
+        munger_answers = result["data"]["round2b"]["4751"]["charlie_munger_agent"]["answers"]
+        assert any(a["question"] == "Which moat metric is insufficient?" for a in munger_answers)
+
+    @patch("src.agents.round_2b_answers.call_llm")
     def test_llm_failure_yields_empty(self, mock_call, state_with_r2a):
         mock_call.side_effect = RuntimeError("timeout")
         result = round_2b_answers_agent(state_with_r2a)
