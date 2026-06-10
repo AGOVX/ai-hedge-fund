@@ -3,10 +3,12 @@ from datetime import date
 
 from src.tools.screener import (
     apply_filters,
+    apply_quality,
     build_report,
     dividend_yield_pct,
     effective_per,
     lot_filter,
+    quality_check,
     value_score,
 )
 
@@ -121,6 +123,73 @@ class TestApplyFilters:
         assert len(out) == 1
 
 
+class TestQualityCheck:
+    def test_all_pass(self):
+        out = quality_check({"roe_pct": 12.0, "equity_ratio_pct": 55.0, "operating_cf": 1e9})
+        assert out == {"passed": True, "failed": [], "missing": []}
+
+    def test_boundaries_inclusive(self):
+        # ROE 8.0% / 自己資本比率 30.0% はちょうど合格、営業CF は 0 で不合格 (>0)
+        out = quality_check({"roe_pct": 8.0, "equity_ratio_pct": 30.0, "operating_cf": 0.0})
+        assert out["failed"] == ["operating_cf"]
+        assert out["passed"] is False
+
+    def test_low_roe_fails(self):
+        out = quality_check({"roe_pct": 3.5, "equity_ratio_pct": 55.0, "operating_cf": 1e9})
+        assert out["passed"] is False
+        assert out["failed"] == ["roe"]
+
+    def test_low_equity_ratio_fails(self):
+        out = quality_check({"roe_pct": 12.0, "equity_ratio_pct": 18.0, "operating_cf": 1e9})
+        assert out["failed"] == ["equity_ratio"]
+
+    def test_missing_is_lenient(self):
+        # 欠損は不合格にしない (フラグで残す思想)
+        out = quality_check({"roe_pct": None, "equity_ratio_pct": None, "operating_cf": None})
+        assert out["passed"] is True
+        assert set(out["missing"]) == {"roe", "equity_ratio", "operating_cf"}
+
+    def test_mixed_missing_and_fail(self):
+        out = quality_check({"roe_pct": 3.0, "equity_ratio_pct": None, "operating_cf": 1e9})
+        assert out["passed"] is False
+        assert out["failed"] == ["roe"]
+        assert out["missing"] == ["equity_ratio"]
+
+
+class TestApplyQuality:
+    _CANDS = [
+        {"ticker": "1111", "name": "優良A", "sector33": "卸売業", "price": 400.0,
+         "per": 7.0, "pbr": 0.6, "dividend_yield_pct": 4.8, "market_cap": 5e10, "value_score": 95.0},
+        {"ticker": "2222", "name": "罠B", "sector33": "卸売業", "price": 450.0,
+         "per": 6.0, "pbr": 0.5, "dividend_yield_pct": 4.0, "market_cap": 6e10, "value_score": 90.0},
+        {"ticker": "3333", "name": "欠損C", "sector33": "卸売業", "price": 300.0,
+         "per": 8.0, "pbr": 0.7, "dividend_yield_pct": 3.5, "market_cap": 7e10, "value_score": 85.0},
+    ]
+    _QUALITY = {
+        "1111.T": {"roe_pct": 12.0, "equity_ratio_pct": 55.0, "operating_cf": 1e9},
+        "2222.T": {"roe_pct": 2.0, "equity_ratio_pct": 15.0, "operating_cf": -1e8},   # バリュートラップ
+        "3333.T": {"roe_pct": None, "equity_ratio_pct": None, "operating_cf": None},  # データ欠損
+    }
+
+    def test_trap_dropped_missing_kept(self):
+        survivors, dropped = apply_quality(self._CANDS, fetch=lambda s: self._QUALITY[s], pause_sec=0)
+        assert [c["ticker"] for c in survivors] == ["1111", "3333"]
+        assert [c["ticker"] for c in dropped] == ["2222"]
+        assert set(dropped[0]["quality_failed"]) == {"roe", "equity_ratio", "operating_cf"}
+        assert set(survivors[1]["quality_missing"]) == {"roe", "equity_ratio", "operating_cf"}
+
+    def test_top_n_limits_check(self):
+        # top_n=1 なら 2 件目以降はチェックせず捨てる
+        survivors, dropped = apply_quality(self._CANDS, top_n=1, fetch=lambda s: self._QUALITY[s], pause_sec=0)
+        assert [c["ticker"] for c in survivors] == ["1111"]
+        assert dropped == []
+
+    def test_metrics_attached(self):
+        survivors, _ = apply_quality(self._CANDS[:1], fetch=lambda s: self._QUALITY[s], pause_sec=0)
+        assert survivors[0]["roe_pct"] == 12.0
+        assert survivors[0]["equity_ratio_pct"] == 55.0
+
+
 class TestBuildReport:
     def test_report_shape(self):
         cands = apply_filters(TestApplyFilters._ROWS, 500_000, 10_000_000_000)
@@ -128,3 +197,20 @@ class TestBuildReport:
         assert "割安株スクリーニング — 2026-06-10" in rep
         assert "推奨ではない" in rep
         assert "| 1 | 1111 |" in rep
+        # 質チェックなしの呼び出しでは質列・除外セクションを出さない (後方互換)
+        assert "質的足切り" not in rep
+        assert "ROE" not in rep
+
+    def test_report_with_quality(self):
+        survivors, dropped = apply_quality(
+            TestApplyQuality._CANDS, fetch=lambda s: TestApplyQuality._QUALITY[s], pause_sec=0
+        )
+        rep = build_report(survivors, 500_000, top=10, today=date(2026, 6, 10),
+                           universe_size=1000, dropped=dropped)
+        assert "質的足切り" in rep
+        assert "除外 1 銘柄" in rep
+        assert "| 自己資本比率 |" in rep
+        assert "12.0%" in rep            # 優良A の ROE
+        assert "⚠—" in rep               # 欠損C のフラグ
+        assert "2222 罠B" in rep          # 除外セクション
+        assert "ROE 2.0%" in rep

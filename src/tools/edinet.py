@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from datetime import date, timedelta
 from pathlib import Path
 
 from src.tools import filings_store
@@ -37,6 +38,10 @@ logger = logging.getLogger(__name__)
 # doc_id of the latest fetched Securities Report per ticker, populated by
 # _fetch_latest_securities_report (stays empty when that function is mocked).
 _DOC_IDS: dict[str, str] = {}
+
+# Latest 有報の提出日と EDINET コード (過去期の周年窓プローブ用)
+_SUBMIT_DATES: dict[str, "date"] = {}
+_EDINET_CODES: dict[str, str] = {}
 
 # In-process cache of parsed SecuritiesReports. Successes ONLY — failures
 # (missing key, network error) are NOT cached so a transient error doesn't
@@ -131,6 +136,12 @@ def _fetch_latest_securities_report(ticker: str, max_age_days: int = 540):
     doc_id = getattr(docs[0], "doc_id", None)
     if doc_id:
         _DOC_IDS[ticker] = str(doc_id)
+    submit_dt = getattr(docs[0], "filing_datetime", None)
+    if submit_dt:
+        _SUBMIT_DATES[ticker] = submit_dt.date()
+    edinet_code = getattr(entity, "edinet_code", None)
+    if edinet_code:
+        _EDINET_CODES[ticker] = str(edinet_code)
 
     # documents() typically returns newest-first
     try:
@@ -146,6 +157,8 @@ def _fetch_latest_securities_report(ticker: str, max_age_days: int = 540):
 def _report_cache_clear() -> None:
     _REPORT_CACHE.clear()
     _DOC_IDS.clear()
+    _SUBMIT_DATES.clear()
+    _EDINET_CODES.clear()
 
 
 # lru_cache 互換 API (テスト等が cache_clear() を呼ぶ)
@@ -197,33 +210,8 @@ def _as_float(v) -> float | None:
         return None
 
 
-def get_line_items_for_ticker(ticker: str, requested: list[str]) -> dict | None:
-    """Return {line_item_name: float|None, "report_period": YYYY-MM-DD, ...} or None.
-
-    Returns None if EDINET fetch failed entirely (no key, no docs, parse error).
-    Returns dict with all requested items (None for items we couldn't resolve)
-    when at least one item was extracted.
-
-    Persistent cache: extracted payloads are stored via filings_store, so a
-    second call (even in a new process) is served from SQLite without hitting
-    EDINET. Cache TTL is EDINET_CACHE_DAYS (default 30).
-    """
-    try:
-        cache_days = int(os.environ.get("EDINET_CACHE_DAYS", "30"))
-    except ValueError:
-        logger.warning("EDINET_CACHE_DAYS が数値でない — 既定の 30 日を使用")
-        cache_days = 30
-    cached = filings_store.load_line_items(ticker, max_age_days=cache_days)
-    if cached is not None and all(k in cached for k in requested):
-        logger.info("EDINET line-items cache hit for %s (period=%s)", ticker, cached.get("report_period"))
-        return {k: cached[k] for k in requested} | {
-            k: cached.get(k) for k in ("report_period", "currency", "accounting_standard")
-        }
-
-    report = _fetch_latest_securities_report(ticker)
-    if report is None:
-        return None
-
+def _extract_items(report, requested: list[str]) -> dict:
+    """SecuritiesReport から requested の項目を抽出 (期メタデータ付き)。"""
     result: dict = {}
 
     # Period metadata
@@ -260,6 +248,38 @@ def get_line_items_for_ticker(ticker: str, requested: list[str]) -> dict | None:
             guesses = [buffett_name, _snake_to_pascal(buffett_name)]
             result[buffett_name] = _find_raw(report, guesses)
 
+    return result
+
+
+def get_line_items_for_ticker(ticker: str, requested: list[str]) -> dict | None:
+    """Return {line_item_name: float|None, "report_period": YYYY-MM-DD, ...} or None.
+
+    Returns None if EDINET fetch failed entirely (no key, no docs, parse error).
+    Returns dict with all requested items (None for items we couldn't resolve)
+    when at least one item was extracted.
+
+    Persistent cache: extracted payloads are stored via filings_store, so a
+    second call (even in a new process) is served from SQLite without hitting
+    EDINET. Cache TTL is EDINET_CACHE_DAYS (default 30).
+    """
+    try:
+        cache_days = int(os.environ.get("EDINET_CACHE_DAYS", "30"))
+    except ValueError:
+        logger.warning("EDINET_CACHE_DAYS が数値でない — 既定の 30 日を使用")
+        cache_days = 30
+    cached = filings_store.load_line_items(ticker, max_age_days=cache_days)
+    if cached is not None and all(k in cached for k in requested):
+        logger.info("EDINET line-items cache hit for %s (period=%s)", ticker, cached.get("report_period"))
+        return {k: cached[k] for k in requested} | {
+            k: cached.get(k) for k in ("report_period", "currency", "accounting_standard")
+        }
+
+    report = _fetch_latest_securities_report(ticker)
+    if report is None:
+        return None
+
+    result = _extract_items(report, requested)
+
     # Persist so future runs (any process) skip the EDINET round-trip
     doc_id = _DOC_IDS.get(ticker) or f"period-{result.get('report_period') or 'unknown'}"
     try:
@@ -268,6 +288,167 @@ def get_line_items_for_ticker(ticker: str, requested: list[str]) -> dict | None:
         logger.warning("Failed to persist line items for %s: %s", ticker, e)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# 過去期の有報時系列 (Buffett 流の ROE 10年安定性評価用)
+# ---------------------------------------------------------------------------
+
+_HISTORY_MARKER = "__history_scan__"
+_PROBE_WINDOW_DAYS = 12  # 周年日 ± この日数を外側に向かって探索
+
+
+def _probe_yuho_doc(edinet_code: str, around: date, window: int = _PROBE_WINDOW_DAYS):
+    """around の前後 window 日を近い順に走査し、該当法人の有報 (120) を返す。
+
+    有報の提出日は毎年ほぼ同時期 (3月期 → 6月下旬) なので、全日付走査
+    (10年 = 3,650 リクエスト) ではなく周年窓だけを叩く (典型 数リクエスト/期)。
+    """
+    import edinet_tools
+
+    today = date.today()
+    offsets = [0]
+    for o in range(1, window + 1):
+        offsets += [o, -o]
+    for off in offsets:
+        d = around + timedelta(days=off)
+        if d > today:
+            continue
+        try:
+            docs = edinet_tools.documents(date=d.isoformat(), doc_type="120")
+        except Exception as e:
+            logger.warning("EDINET documents(%s) failed: %s", d, e)
+            continue
+        for doc in docs:
+            if getattr(doc, "filer_edinet_code", None) == edinet_code:
+                return doc
+    return None
+
+
+def get_line_items_history(
+    ticker: str, requested: list[str], periods: int = 10
+) -> list[dict]:
+    """過去 periods 期分の有報 line-items を期末降順で返す (取れた分だけ)。
+
+    - 過去の有報は不変なので SQLite キャッシュに TTL なしで永続化
+    - 走査済みマーカーを残し、上場年数 < periods の銘柄で毎回プローブし直さない
+    - EDINET キーが無い場合などはキャッシュ分のみ返す (空 list あり得る)
+    """
+    cached = filings_store.load_line_items_history(ticker)
+    usable = [p for p in cached if p.get("report_period") and all(k in p for k in requested)]
+    marker = filings_store.load_line_items_by_doc(ticker, _HISTORY_MARKER) or {}
+    if len(usable) >= periods or marker.get("scanned_periods", 0) >= periods:
+        return usable[:periods]
+
+    # --- 最新期 (既存経路で取得・保存) ---
+    latest = get_line_items_for_ticker(ticker, requested)
+    if latest is None:
+        logger.warning("%s: 最新有報が取得できず — キャッシュ %d 期分のみ返す", ticker, len(usable))
+        return usable[:periods]
+
+    edinet_code = _EDINET_CODES.get(ticker)
+    anchor = _SUBMIT_DATES.get(ticker)
+    if not edinet_code or not anchor:
+        # キャッシュヒットで EDINET に行かなかった場合は実フェッチでメタを取る
+        _report_cache_clear()
+        if _fetch_latest_securities_report(ticker) is None:
+            return usable[:periods]
+        edinet_code = _EDINET_CODES.get(ticker)
+        anchor = _SUBMIT_DATES.get(ticker)
+        if not edinet_code or not anchor:
+            return usable[:periods]
+
+    # 取得済み年度の判定は「期末の年」で行う (12月期決算は提出年 ≠ 期末年)
+    have_years = {
+        str(p["report_period"])[:4]
+        for p in usable + [latest]
+        if p.get("report_period")
+    }
+    latest_fy_year = (
+        int(str(latest["report_period"])[:4]) if latest.get("report_period") else anchor.year
+    )
+
+    # --- 過去期を周年窓でプローブ ---
+    found = 0
+    for k in range(1, periods):
+        if str(latest_fy_year - k) in have_years:
+            continue  # この年度は取得済み
+        target = anchor - timedelta(days=round(365.25 * k))
+        doc = _probe_yuho_doc(edinet_code, target)
+        if doc is None:
+            logger.info("%s: %d 期前 (%s 近辺) の有報が見つからない", ticker, k, target)
+            continue
+        try:
+            report = doc.parse()
+        except Exception as e:
+            logger.warning("%s: docID=%s parse 失敗: %s", ticker, getattr(doc, "doc_id", "?"), e)
+            continue
+        payload = _extract_items(report, requested)
+        if not payload.get("report_period"):
+            payload["report_period"] = getattr(doc, "period_end", None)
+        try:
+            filings_store.save_line_items(ticker, str(doc.doc_id), payload)
+        except Exception as e:
+            logger.warning("%s: 過去期 line-items の保存失敗: %s", ticker, e)
+        if payload.get("report_period"):
+            have_years.add(str(payload["report_period"])[:4])
+        found += 1
+
+    # 走査完了マーカー (上場が浅く periods 期分無い銘柄の再走査防止)
+    try:
+        filings_store.save_line_items(
+            ticker, _HISTORY_MARKER,
+            {"scanned_periods": periods, "found": found, "report_period": None},
+        )
+    except Exception as e:
+        logger.warning("%s: 履歴マーカーの保存失敗: %s", ticker, e)
+
+    refreshed = filings_store.load_line_items_history(ticker)
+    usable = [p for p in refreshed if p.get("report_period") and all(k in p for k in requested)]
+    return usable[:periods]
+
+
+def build_history_report(ticker: str, payloads: list[dict]) -> str:
+    """期末降順の payloads から ROE 推移等の Markdown テーブルを作る (pure)。"""
+    lines = [
+        f"# 財務時系列 — {ticker} ({len(payloads)} 期分)",
+        "",
+        "出所: EDINET 有価証券報告書 XBRL。単位: 億円 (1e8 JPY)。",
+        "",
+        "| 期末 | 売上高 | 純利益 | 純利益率 | ROE | 自己資本比率 | FCF |",
+        "|---|---|---|---|---|---|---|",
+    ]
+
+    def _oku(v) -> str:
+        return f"{v / 1e8:,.0f}" if v is not None else "—"
+
+    def _pct(num, den) -> str:
+        return f"{num / den * 100:.1f}%" if num is not None and den else "—"
+
+    for p in payloads:
+        rev = p.get("revenue")
+        ni = p.get("net_income")
+        eq = p.get("shareholders_equity")
+        ta = p.get("total_assets")
+        fcf = p.get("free_cash_flow")
+        lines.append(
+            f"| {p.get('report_period', '?')} | {_oku(rev)} | {_oku(ni)} "
+            f"| {_pct(ni, rev)} | {_pct(ni, eq)} | {_pct(eq, ta)} | {_oku(fcf)} |"
+        )
+
+    roes = [
+        p["net_income"] / p["shareholders_equity"] * 100
+        for p in payloads
+        if p.get("net_income") is not None and p.get("shareholders_equity")
+    ]
+    if roes:
+        lines += [
+            "",
+            f"ROE: 平均 {sum(roes) / len(roes):.1f}% / 最低 {min(roes):.1f}% / 最高 {max(roes):.1f}% "
+            f"({len(roes)} 期)",
+        ]
+    lines.append("")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

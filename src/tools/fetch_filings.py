@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tanshin", action="store_true", help="決算短信 PDF のみ (TDnet, キー不要)")
     p.add_argument("--yuho", action="store_true", help="有報 PDF のみ (EDINET, 要キー)")
     p.add_argument("--items", action="store_true", help="XBRL 12項目抽出のみ (EDINET, 要キー)")
+    p.add_argument("--history", type=int, nargs="?", const=10, default=None, metavar="N",
+                   help="過去 N 期分 (既定10) の財務時系列を取得・表示 (EDINET, 要キー)")
     p.add_argument("--list", action="store_true", help="キャッシュ済みドキュメント一覧を表示")
     args = p.parse_args(argv)
 
@@ -60,11 +62,18 @@ def main(argv: list[str] | None = None) -> int:
     if not args.tickers:
         p.error("ticker を指定してください (または --list)")
 
-    do_all = not (args.tanshin or args.yuho or args.items)
+    do_all = not (args.tanshin or args.yuho or args.items or args.history)
     failures = 0
 
     for ticker in args.tickers:
         print(f"=== {ticker} ===")
+        if args.history:
+            rows = edinet.get_line_items_history(ticker, _BUFFETT_ITEMS, periods=args.history)
+            if rows:
+                print(edinet.build_history_report(ticker, rows))
+            else:
+                print("  財務時系列 : 取得失敗 (EDINET_API_KEY 未設定?)")
+                failures += 1
         if do_all or args.tanshin:
             path = tdnet.download_kessan_tanshin(ticker)
             print(f"  決算短信 PDF : {path or '取得失敗'}")

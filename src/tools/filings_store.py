@@ -184,9 +184,10 @@ def load_line_items(ticker: str, max_age_days: int = 30) -> dict | None:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
     with closing(_connect()) as conn:
         row = conn.execute(
-            """
+            r"""
             SELECT payload FROM line_items
             WHERE ticker = ? AND fetched_at >= ?
+              AND doc_id NOT LIKE '\_\_%' ESCAPE '\'   -- 内部マーカー行を除外
             ORDER BY fetched_at DESC LIMIT 1
             """,
             (ticker, cutoff),
@@ -197,4 +198,46 @@ def load_line_items(ticker: str, max_age_days: int = 30) -> dict | None:
         return json.loads(row["payload"])
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning("Corrupt cached line_items for %s: %s", ticker, e)
+        return None
+
+
+def load_line_items_history(ticker: str) -> list[dict]:
+    """全キャッシュ済み期の line-items を期末降順で返す (有報は不変なので TTL なし)。
+
+    同一 period の重複は新しい fetched_at を優先。doc_id が "__" で始まる
+    内部マーカー行は含めない。
+    """
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            r"""
+            SELECT payload, period FROM line_items
+            WHERE ticker = ? AND doc_id NOT LIKE '\_\_%' ESCAPE '\'
+            ORDER BY period DESC, fetched_at DESC
+            """,
+            (ticker,),
+        ).fetchall()
+    out, seen = [], set()
+    for r in rows:
+        if r["period"] in seen:
+            continue
+        try:
+            out.append(json.loads(r["payload"]))
+            seen.add(r["period"])
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("Corrupt cached line_items for %s (period=%s): %s", ticker, r["period"], e)
+    return out
+
+
+def load_line_items_by_doc(ticker: str, doc_id: str) -> dict | None:
+    """特定 doc_id の payload (マーカー行の読み出しにも使う)。"""
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            "SELECT payload FROM line_items WHERE ticker = ? AND doc_id = ?",
+            (ticker, doc_id),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(row["payload"])
+    except (json.JSONDecodeError, TypeError):
         return None

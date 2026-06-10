@@ -63,11 +63,12 @@ Invoke-Step "watchlist_check" "-m src.tools.watchlist_check"
 # --- 2. ポートフォリオスナップショット (毎回) -----------------------------
 Invoke-Step "portfolio snapshot" "-m src.tools.portfolio snapshot"
 
-# --- 3. 判断スコアカード (月曜のみ) ---------------------------------------
+# --- 3. 判断スコアカード + パフォーマンス測定 (月曜のみ) -------------------
 if ((Get-Date).DayOfWeek -eq "Monday") {
     Invoke-Step "decision_review" "-m src.tools.decision_review"
+    Invoke-Step "performance" "-m src.tools.performance"
 } else {
-    Write-Log "decision_review はスキップ (月曜のみ実行)"
+    Write-Log "decision_review / performance はスキップ (月曜のみ実行)"
 }
 
 Write-Log "=== daily_check 終了 (失敗 $script:failures 件) ==="

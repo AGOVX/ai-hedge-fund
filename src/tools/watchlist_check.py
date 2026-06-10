@@ -3,9 +3,11 @@
 Reads E:\\Company\\data\\watchlist.yaml and produces a markdown checkup report:
 
   1. Review deadlines  — next_review_due overdue / due within 7 days
-  2. Technical signals — 200DMA position, 52w breakout/breakdown vs the
+  2. Earnings dates    — manual `earnings_date` in watchlist.yaml takes priority,
+                         falling back to a yfinance estimate (7日以内は要対応)
+  3. Technical signals — 200DMA position, 52w breakout/breakdown vs the
                          reentry/invalidation conditions recorded per PM
-  3. New disclosures   — TDnet filings in the last N days (default 14)
+  4. New disclosures   — TDnet filings in the last N days (default 14)
 
 The report is written to data/reports/watchlist-check-YYYYMMDD.md and printed.
 This tool only OBSERVES and reports — re-analysis is still requested by the
@@ -144,6 +146,7 @@ def build_report(
     today: date,
     technicals_by_ticker: dict,
     disclosures_by_ticker: dict[str, list[dict]],
+    earnings_by_ticker: dict[str, dict] | None = None,
 ) -> str:
     lines = [
         f"# Watch List 自動点検レポート — {today.isoformat()}",
@@ -174,6 +177,20 @@ def build_report(
             lines.append(f"- レビュー期日: {due['due']} (残り{due['days_left']}日)")
         else:
             lines.append("- レビュー期日: 未設定")
+
+        # 1.5 next earnings date (hybrid: manual earnings_date > yfinance estimate)
+        einfo = (earnings_by_ticker or {}).get(ticker)
+        if einfo and einfo.get("date"):
+            from src.tools.earnings import earnings_alert
+
+            alert = earnings_alert(einfo)
+            if alert:
+                lines.append(f"- {alert}")
+                urgent.append(f"{ticker} {name}: {alert}")
+            else:
+                lines.append(
+                    f"- 次回決算発表: {einfo['date']} ({einfo['source']}, あと{einfo['days_to']}日)"
+                )
 
         # 2. technicals
         tech = technicals_by_ticker.get(ticker)
@@ -224,8 +241,10 @@ def run(no_net: bool = False, today: date | None = None) -> Path:
 
     technicals_by_ticker: dict = {}
     disclosures_by_ticker: dict[str, list[dict]] = {}
+    earnings_by_ticker: dict[str, dict] = {}
 
     if not no_net:
+        from src.tools.earnings import resolve_earnings_date
         from src.tools.technicals import get_technicals
         from src.tools.tdnet import list_disclosures
 
@@ -235,8 +254,9 @@ def run(no_net: bool = False, today: date | None = None) -> Path:
                 continue
             technicals_by_ticker[ticker] = get_technicals(ticker)
             disclosures_by_ticker[ticker] = list_disclosures(ticker, limit=30)
+            earnings_by_ticker[ticker] = resolve_earnings_date(e, today)
 
-    report = build_report(entries, today, technicals_by_ticker, disclosures_by_ticker)
+    report = build_report(entries, today, technicals_by_ticker, disclosures_by_ticker, earnings_by_ticker)
     return write_report(f"watchlist-check-{today.strftime('%Y%m%d')}.md", report)
 
 

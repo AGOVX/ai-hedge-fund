@@ -129,6 +129,38 @@ class TestBuildReport:
         report = build_report([], TODAY, {}, {})
         assert "特になし" in report
 
+    def test_earnings_line_shown(self):
+        entries = [{"ticker": "8001", "name": "伊藤忠商事", "status": "watch",
+                    "next_review_due": "2026-07-30"}]
+        earnings = {"8001": {"date": "2026-08-04", "source": "手動", "days_to": 55}}
+        report = build_report(entries, TODAY, {"8001": _tech()}, {"8001": []}, earnings)
+        assert "次回決算発表: 2026-08-04 (手動, あと55日)" in report
+
+    def test_earnings_soon_goes_urgent(self):
+        entries = [{"ticker": "8001", "name": "伊藤忠商事", "status": "watch",
+                    "next_review_due": "2026-07-30"}]
+        earnings = {"8001": {"date": "2026-06-13", "source": "推定", "days_to": 3}}
+        report = build_report(entries, TODAY, {"8001": _tech()}, {"8001": []}, earnings)
+        assert "決算発表接近" in report
+        # 要対応サマリー (本文より先) にも上がっている
+        summary = report.split("## 8001")[0]
+        assert "決算発表接近" in summary
+
+    def test_earnings_none_omitted(self):
+        entries = [{"ticker": "8001", "name": "伊藤忠商事", "status": "watch",
+                    "next_review_due": "2026-07-30"}]
+        earnings = {"8001": {"date": None, "source": None, "days_to": None}}
+        report = build_report(entries, TODAY, {"8001": _tech()}, {"8001": []}, earnings)
+        assert "次回決算発表" not in report
+
+    def test_backward_compatible_without_earnings(self):
+        # earnings_by_ticker を渡さない既存呼び出しが壊れないこと
+        entries = [{"ticker": "8001", "name": "伊藤忠商事", "status": "watch",
+                    "next_review_due": "2026-07-30"}]
+        report = build_report(entries, TODAY, {"8001": _tech()}, {"8001": []})
+        assert "次回決算発表" not in report
+        assert "8001 伊藤忠商事" in report
+
     def test_dma200_none_shows_na(self):
         # 履歴200日未満 (above_dma200 is None) は「下」扱いせず n/a 表示
         entries = [{"ticker": "9999", "name": "新規上場", "status": "watch",

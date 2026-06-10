@@ -79,3 +79,33 @@ class TestLineItems:
         filings_store.save_line_items("4751", "DOC1", {"revenue": 1.0, "report_period": None})
         filings_store.save_line_items("4751", "DOC1", {"revenue": 2.0, "report_period": None})
         assert filings_store.load_line_items("4751")["revenue"] == 2.0
+
+
+class TestLineItemsHistory:
+    def test_history_sorted_desc_no_ttl(self):
+        for i, period in enumerate(["2023-03-31", "2025-03-31", "2024-03-31"]):
+            filings_store.save_line_items(
+                "8001", f"DOC{i}", {"net_income": float(i), "report_period": period}
+            )
+        out = filings_store.load_line_items_history("8001")
+        assert [p["report_period"] for p in out] == ["2025-03-31", "2024-03-31", "2023-03-31"]
+
+    def test_same_period_deduped_latest_wins(self):
+        filings_store.save_line_items("8001", "OLD", {"net_income": 1.0, "report_period": "2025-03-31"})
+        time.sleep(0.01)
+        filings_store.save_line_items("8001", "NEW", {"net_income": 2.0, "report_period": "2025-03-31"})
+        out = filings_store.load_line_items_history("8001")
+        assert len(out) == 1
+        assert out[0]["net_income"] == 2.0
+
+    def test_marker_rows_excluded(self):
+        # "__" 始まりの doc_id は内部マーカー — 履歴にも最新キャッシュにも出ない
+        filings_store.save_line_items("8001", "__history_scan__", {"scanned_periods": 10, "report_period": None})
+        assert filings_store.load_line_items_history("8001") == []
+        assert filings_store.load_line_items("8001") is None
+        # マーカー自体は doc_id 指定で読める
+        m = filings_store.load_line_items_by_doc("8001", "__history_scan__")
+        assert m["scanned_periods"] == 10
+
+    def test_load_by_doc_unknown(self):
+        assert filings_store.load_line_items_by_doc("8001", "NOPE") is None

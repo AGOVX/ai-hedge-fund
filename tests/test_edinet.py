@@ -9,13 +9,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.tools import edinet
+from src.tools import edinet, filings_store
 from src.tools.edinet import (
     _as_float,
     _find_raw,
     _has_api_key,
     _snake_to_pascal,
+    build_history_report,
     get_line_items_for_ticker,
+    get_line_items_history,
 )
 
 
@@ -267,3 +269,70 @@ class TestPersistentCache:
         # Requesting an item not in the cached payload must re-fetch
         get_line_items_for_ticker("4751", ["revenue", "gross_profit"])
         assert mock_fetch.call_count == 2
+
+
+class TestLineItemsHistory:
+    """過去期の有報時系列 — キャッシュ/マーカー優先でネットワークを叩かないこと。"""
+
+    def _seed(self, periods: list[str]):
+        for i, period in enumerate(periods):
+            filings_store.save_line_items(
+                "8001",
+                f"DOC{i}",
+                {"net_income": 100.0 + i, "shareholders_equity": 1000.0,
+                 "report_period": period},
+            )
+
+    @patch("src.tools.edinet._fetch_latest_securities_report")
+    def test_served_from_cache_when_enough_periods(self, mock_fetch):
+        self._seed(["2024-03-31", "2025-03-31", "2026-03-31"])
+        out = get_line_items_history("8001", ["net_income", "shareholders_equity"], periods=3)
+        assert [p["report_period"] for p in out] == ["2026-03-31", "2025-03-31", "2024-03-31"]
+        mock_fetch.assert_not_called()
+
+    @patch("src.tools.edinet._fetch_latest_securities_report")
+    def test_marker_prevents_rescan_for_short_history(self, mock_fetch):
+        # 上場3年の銘柄: 3期しか無いが走査済みマーカーがあれば再走査しない
+        self._seed(["2024-03-31", "2025-03-31", "2026-03-31"])
+        filings_store.save_line_items(
+            "8001", "__history_scan__",
+            {"scanned_periods": 10, "found": 2, "report_period": None},
+        )
+        out = get_line_items_history("8001", ["net_income", "shareholders_equity"], periods=10)
+        assert len(out) == 3
+        mock_fetch.assert_not_called()
+
+    @patch("src.tools.edinet._fetch_latest_securities_report")
+    def test_degrades_to_cache_when_fetch_fails(self, mock_fetch):
+        mock_fetch.return_value = None
+        self._seed(["2025-03-31", "2026-03-31"])
+        edinet._fetch_latest_securities_report.cache_clear()
+        out = get_line_items_history("8001", ["net_income", "shareholders_equity"], periods=10)
+        assert len(out) == 2  # ネットワーク不可でもキャッシュ分は返す
+
+    @patch("src.tools.edinet._fetch_latest_securities_report")
+    def test_no_key_no_cache_empty(self, mock_fetch, monkeypatch):
+        monkeypatch.delenv("EDINET_API_KEY", raising=False)
+        mock_fetch.return_value = None
+        edinet._fetch_latest_securities_report.cache_clear()
+        assert get_line_items_history("9999", ["net_income"], periods=10) == []
+
+
+class TestBuildHistoryReport:
+    def test_roe_and_table(self):
+        payloads = [
+            {"report_period": "2026-03-31", "revenue": 1_000e8, "net_income": 80e8,
+             "shareholders_equity": 800e8, "total_assets": 2_000e8, "free_cash_flow": 60e8},
+            {"report_period": "2025-03-31", "revenue": 900e8, "net_income": 72e8,
+             "shareholders_equity": 720e8, "total_assets": 1_800e8, "free_cash_flow": None},
+        ]
+        rep = build_history_report("8001", payloads)
+        assert "2 期分" in rep
+        assert "| 2026-03-31 | 1,000 | 80 | 8.0% | 10.0% | 40.0% | 60 |" in rep
+        assert "| 2025-03-31 |" in rep and "| — |" in rep  # FCF 欠損は —
+        assert "ROE: 平均 10.0%" in rep
+
+    def test_missing_values_safe(self):
+        rep = build_history_report("8001", [{"report_period": "2026-03-31"}])
+        assert "—" in rep
+        assert "ROE: 平均" not in rep  # ROE 計算不能なら集計行なし
