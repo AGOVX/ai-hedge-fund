@@ -1,7 +1,14 @@
 """Unit tests for src/tools/screener.py — pure filter/scoring logic, no network."""
 from datetime import date
 
-from src.tools.screener import apply_filters, build_report, lot_filter, value_score
+from src.tools.screener import (
+    apply_filters,
+    build_report,
+    dividend_yield_pct,
+    effective_per,
+    lot_filter,
+    value_score,
+)
 
 
 class TestLotFilter:
@@ -44,6 +51,44 @@ class TestValueScore:
     def test_no_metrics_is_none(self):
         assert value_score({}) is None
         assert value_score({"per": None, "pbr": None, "dividend_yield_pct": None}) is None
+
+
+class TestEffectivePer:
+    def test_pe_present_passthrough(self):
+        assert effective_per({"trailingPE": 12.3}) == 12.3
+
+    def test_loss_making_maps_to_negative(self):
+        # 赤字企業: yfinance は trailingPE を返さない → EPS<0 で検知し PER=-1.0 (素点0)
+        assert effective_per({"trailingPE": None, "trailingEps": -50.0}) == -1.0
+
+    def test_no_data_is_none(self):
+        assert effective_per({}) is None
+        assert effective_per({"trailingPE": None, "trailingEps": None}) is None
+
+    def test_positive_eps_without_pe_is_none(self):
+        # EPS 正なのに PE 欠落 → 赤字とは判定しない
+        assert effective_per({"trailingEps": 100.0}) is None
+
+
+class TestDividendYieldPct:
+    def test_rate_over_price_preferred(self):
+        # dividendRate / price がバージョン非依存で最優先
+        assert dividend_yield_pct({"dividendRate": 50.0, "dividendYield": 999.0}, 2000.0) == 2.5
+
+    def test_trailing_rate_fallback(self):
+        assert dividend_yield_pct({"trailingAnnualDividendRate": 30.0}, 1500.0) == 2.0
+
+    def test_yield_fallback_is_already_percent(self):
+        # yfinance 1.4.x は dividendYield をパーセント値で返す → ×100 してはいけない
+        assert dividend_yield_pct({"dividendYield": 0.9}, None) == 0.9
+
+    def test_low_yield_not_inflated(self):
+        # 旧バグ: 0.9% が 90% に化けて低配当株が満点になっていた
+        out = dividend_yield_pct({"dividendYield": 0.9}, None)
+        assert out is not None and out < 5.0
+
+    def test_no_data_is_none(self):
+        assert dividend_yield_pct({}, 1000.0) is None
 
 
 class TestApplyFilters:

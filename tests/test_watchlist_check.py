@@ -1,5 +1,5 @@
 """Unit tests for src/tools/watchlist_check.py — pure logic, no network."""
-from datetime import date
+from datetime import date, datetime
 
 from src.tools.technicals import Technicals
 from src.tools.watchlist_check import (
@@ -47,6 +47,17 @@ class TestReviewDue:
     def test_date_object_from_yaml(self):
         # yaml.safe_load returns datetime.date for unquoted dates
         out = check_review_due({"next_review_due": date(2026, 6, 13)}, TODAY)
+        assert out["status"] == "due_soon"
+
+    def test_datetime_object_from_yaml(self):
+        # yaml は時刻付き表記だと datetime を返す。datetime は date のサブクラス
+        # なので isinstance(raw, date) だけだと datetime - date で TypeError になる
+        out = check_review_due({"next_review_due": datetime(2026, 6, 13, 10, 0)}, TODAY)
+        assert out["status"] == "due_soon"
+        assert out["days_left"] == 3
+
+    def test_datetime_string_with_time(self):
+        out = check_review_due({"next_review_due": "2026-06-13 10:00:00"}, TODAY)
         assert out["status"] == "due_soon"
 
 
@@ -117,3 +128,12 @@ class TestBuildReport:
     def test_empty_watchlist(self):
         report = build_report([], TODAY, {}, {})
         assert "特になし" in report
+
+    def test_dma200_none_shows_na(self):
+        # 履歴200日未満 (above_dma200 is None) は「下」扱いせず n/a 表示
+        entries = [{"ticker": "9999", "name": "新規上場", "status": "watch",
+                    "next_review_due": "2026-07-30"}]
+        techs = {"9999": _tech(ticker="9999", dma200=None, above_dma200=None,
+                               dma200_distance_pct=None)}
+        report = build_report(entries, TODAY, techs, {"9999": []})
+        assert "200DMA n/a" in report

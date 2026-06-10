@@ -76,6 +76,24 @@ class TestBreakout:
         t = compute_technicals("4751", _series(closes))
         assert t.high_52w == 100.0
 
+    def test_short_history_suppresses_breakout(self):
+        # 上場1年未満 (252バー未満) では新値でもブレイクアウト判定しない
+        closes = [100.0] * 99 + [130.0]
+        volumes = [100_000] * 99 + [300_000]
+        t = compute_technicals("4751", _series(closes, volumes))
+        assert t.bars == 100
+        assert t.breakout_52w_high is False
+        assert t.breakout_volume_confirmed is False
+
+    def test_short_history_suppresses_breakdown(self):
+        closes = [100.0] * 99 + [70.0]
+        t = compute_technicals("4751", _series(closes))
+        assert t.breakdown_52w_low is False
+
+    def test_full_history_reports_bars(self):
+        t = compute_technicals("4751", _series([100.0] * 260))
+        assert t.bars == 260
+
 
 class TestVolumeRatio:
     def test_ratio_computed(self):

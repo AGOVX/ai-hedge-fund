@@ -18,17 +18,14 @@ Usage:
 from __future__ import annotations
 
 import logging
-import os
 from datetime import date, timedelta
 from pathlib import Path
+
+from src.tools.common import write_report
 
 logger = logging.getLogger(__name__)
 
 _OPPORTUNITY_COST_THRESHOLD_PT = 10.0
-
-
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
 
 
 # ---------------------------------------------------------------------------
@@ -155,19 +152,12 @@ def run(today: date | None = None) -> Path:
         results.append(evaluate_decision(dec["outcome"], sr, br) if sr is not None and br is not None else None)
 
     card = build_scorecard(decisions, results, today)
-    out_dir = repo_root() / "data" / "reports"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"decision-scorecard-{today.strftime('%Y%m%d')}.md"
-    out_path.write_text(card, encoding="utf-8")
-    print(card)
-    print(f"[saved] {out_path}")
-    return out_path
+    return write_report(f"decision-scorecard-{today.strftime('%Y%m%d')}.md", card)
 
 
 if __name__ == "__main__":
-    import sys
+    from src.tools.common import utf8_stdout
 
-    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows cp932 対策
+    utf8_stdout()
     logging.basicConfig(level=logging.WARNING)
     run()

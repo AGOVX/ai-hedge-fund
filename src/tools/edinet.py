@@ -28,7 +28,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-from functools import lru_cache
 from pathlib import Path
 
 from src.tools import filings_store
@@ -38,6 +37,11 @@ logger = logging.getLogger(__name__)
 # doc_id of the latest fetched Securities Report per ticker, populated by
 # _fetch_latest_securities_report (stays empty when that function is mocked).
 _DOC_IDS: dict[str, str] = {}
+
+# In-process cache of parsed SecuritiesReports. Successes ONLY — failures
+# (missing key, network error) are NOT cached so a transient error doesn't
+# poison the rest of the process. (lru_cache would cache the None too.)
+_REPORT_CACHE: dict[str, object] = {}
 
 # Top-level imports of edinet_tools are deferred to inside functions so that
 # environments missing the package (or missing the API key) still allow the
@@ -80,13 +84,16 @@ def _has_api_key() -> bool:
     return bool(k) and k != "your-edinet-api-key"
 
 
-@lru_cache(maxsize=128)
 def _fetch_latest_securities_report(ticker: str, max_age_days: int = 540):
     """Fetch the latest Securities Report (有報, doc_type=120) for a ticker.
 
     Returns a parsed SecuritiesReport or None on any failure (missing key,
-    no filings, parse error). Results are cached in-process per ticker.
+    no filings, parse error). Successful results are cached in-process per
+    ticker; failures are retried on the next call.
     """
+    if ticker in _REPORT_CACHE:
+        return _REPORT_CACHE[ticker]
+
     if not _has_api_key():
         logger.warning(
             "EDINET_API_KEY not set — search_line_items_jp will return []. "
@@ -132,22 +139,45 @@ def _fetch_latest_securities_report(ticker: str, max_age_days: int = 540):
         logger.warning("EDINET parse() failed for %s docID=%s: %s", ticker, getattr(docs[0], "doc_id", "?"), e)
         return None
 
+    _REPORT_CACHE[ticker] = report
     return report
 
 
+def _report_cache_clear() -> None:
+    _REPORT_CACHE.clear()
+    _DOC_IDS.clear()
+
+
+# lru_cache 互換 API (テスト等が cache_clear() を呼ぶ)
+_fetch_latest_securities_report.cache_clear = _report_cache_clear
+
+
+def _ratio_like(key: str) -> bool:
+    """比率/マージン系の派生要素か (金額を探しているときに誤って拾わないため)."""
+    kl = key.lower()
+    return any(w in kl for w in ("margin", "ratio", "percentage", "rate"))
+
+
 def _find_raw(report, aliases: list[str]) -> float | None:
-    """Search report.raw_fields for the first key matching any alias substring."""
+    """Search report.raw_fields for the first key matching any alias.
+
+    Match order per alias: exact key → case-insensitive substring。substring の
+    候補が複数あるときは (比率系でない, キー長が短い, 辞書順) で決定論的に選ぶ —
+    'GrossProfit' を探して 'GrossProfitMarginIA' (比率) を拾う事故を防ぐ。
+    """
     raw = getattr(report, "raw_fields", None) or {}
-    lc_keys = {k.lower(): k for k in raw.keys()}
     for alias in aliases:
         # Direct match
         if alias in raw:
             return _as_float(raw[alias])
-        # Substring match (case-insensitive)
+        # Substring match (case-insensitive, deterministic preference)
         alias_lc = alias.lower()
-        for kl, k_orig in lc_keys.items():
-            if alias_lc in kl:
-                return _as_float(raw[k_orig])
+        candidates = sorted(
+            (k for k in raw if alias_lc in k.lower()),
+            key=lambda k: (_ratio_like(k), len(k), k),
+        )
+        if candidates:
+            return _as_float(raw[candidates[0]])
     return None
 
 
@@ -178,7 +208,11 @@ def get_line_items_for_ticker(ticker: str, requested: list[str]) -> dict | None:
     second call (even in a new process) is served from SQLite without hitting
     EDINET. Cache TTL is EDINET_CACHE_DAYS (default 30).
     """
-    cache_days = int(os.environ.get("EDINET_CACHE_DAYS", "30"))
+    try:
+        cache_days = int(os.environ.get("EDINET_CACHE_DAYS", "30"))
+    except ValueError:
+        logger.warning("EDINET_CACHE_DAYS が数値でない — 既定の 30 日を使用")
+        cache_days = 30
     cached = filings_store.load_line_items(ticker, max_age_days=cache_days)
     if cached is not None and all(k in cached for k in requested):
         logger.info("EDINET line-items cache hit for %s (period=%s)", ticker, cached.get("report_period"))
@@ -250,9 +284,10 @@ def fetch_yuho_pdf(ticker: str) -> Path | None:
     A second call for the same doc_id is served from filings_store without
     network access.
     """
+    cached = filings_store.find_filing(ticker, doc_type="yuho_pdf", source="edinet")
+
     if not _has_api_key():
         logger.warning("EDINET_API_KEY not set — fetch_yuho_pdf skipped.")
-        cached = filings_store.find_filing(ticker, doc_type="yuho_pdf", source="edinet")
         return Path(cached["file_path"]) if cached else None
 
     # Resolve the latest doc_id (also warms the line-items fetch path)
@@ -260,10 +295,8 @@ def fetch_yuho_pdf(ticker: str) -> Path | None:
     doc_id = _DOC_IDS.get(ticker)
     if doc_id is None:
         logger.warning("No EDINET doc_id resolved for %s — cannot fetch PDF", ticker)
-        cached = filings_store.find_filing(ticker, doc_type="yuho_pdf", source="edinet")
         return Path(cached["file_path"]) if cached else None
 
-    cached = filings_store.find_filing(ticker, doc_type="yuho_pdf", source="edinet")
     if cached and cached["doc_id"] == doc_id:
         logger.info("有報 PDF cache hit for %s: %s", ticker, cached["file_path"])
         return Path(cached["file_path"])

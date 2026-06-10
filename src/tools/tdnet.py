@@ -94,7 +94,13 @@ def download_kessan_tanshin(ticker: str, limit: int = 30) -> Path | None:
 
     path = _download_pdf(latest["url"], filings_store.ticker_dir(ticker) / f"{latest['doc_id']}_tanshin.pdf")
     if path is None:
-        return Path(cached["file_path"]) if cached else None
+        if cached:
+            logger.warning(
+                "最新の決算短信 (%s) のDLに失敗 — 古いキャッシュ (%s) で代用。鮮度に注意",
+                latest["doc_id"], cached["doc_id"],
+            )
+            return Path(cached["file_path"])
+        return None
 
     filings_store.record_filing(
         ticker=ticker,

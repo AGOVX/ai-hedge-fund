@@ -25,8 +25,11 @@ import json
 import logging
 import os
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from src.tools.common import repo_root
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +60,7 @@ CREATE TABLE IF NOT EXISTS line_items (
 def filings_dir() -> Path:
     """Resolve the filings root directory (created on demand)."""
     env = os.environ.get("FILINGS_DIR", "")
-    if env:
-        root = Path(env)
-    else:
-        # src/tools/filings_store.py -> tools -> src -> ai-hedge-fund -> <repo root>
-        root = Path(__file__).resolve().parents[3] / "data" / "filings"
+    root = Path(env) if env else repo_root() / "data" / "filings"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -98,7 +97,8 @@ def record_filing(
     title: str | None = None,
 ) -> None:
     """Register (or refresh) a downloaded document in the index."""
-    with _connect() as conn:
+    # closing(): sqlite3 の "with conn" は commit するだけで close しない (Windows のファイルロック対策)
+    with closing(_connect()) as conn, conn:
         conn.execute(
             """
             INSERT INTO filings (ticker, source, doc_type, doc_id, period, title, file_path, fetched_at)
@@ -133,7 +133,7 @@ def find_filing(
         params.append(source)
     q += " ORDER BY fetched_at DESC"
 
-    with _connect() as conn:
+    with closing(_connect()) as conn:
         for row in conn.execute(q, params):
             d = dict(row)
             if Path(d["file_path"]).exists():
@@ -144,7 +144,7 @@ def find_filing(
 
 def list_filings(ticker: str | None = None) -> list[dict]:
     """All indexed filings (optionally for one ticker), newest first."""
-    with _connect() as conn:
+    with closing(_connect()) as conn:
         if ticker:
             rows = conn.execute(
                 "SELECT * FROM filings WHERE ticker = ? ORDER BY fetched_at DESC", (ticker,)
@@ -160,7 +160,7 @@ def list_filings(ticker: str | None = None) -> list[dict]:
 
 def save_line_items(ticker: str, doc_id: str, payload: dict) -> None:
     """Persist an extracted line-items dict so future runs skip re-parsing."""
-    with _connect() as conn:
+    with closing(_connect()) as conn, conn:
         conn.execute(
             """
             INSERT INTO line_items (ticker, doc_id, period, payload, fetched_at)
@@ -182,7 +182,7 @@ def load_line_items(ticker: str, max_age_days: int = 30) -> dict | None:
     cheap insurance, not a correctness requirement).
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
-    with _connect() as conn:
+    with closing(_connect()) as conn:
         row = conn.execute(
             """
             SELECT payload FROM line_items

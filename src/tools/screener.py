@@ -35,6 +35,8 @@ from pathlib import Path
 
 import yaml
 
+from src.tools.common import repo_root, write_report
+
 logger = logging.getLogger(__name__)
 
 _JPX_XLS_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
@@ -42,10 +44,6 @@ _PRIME_LABEL = "プライム"
 _DEFAULT_CAPITAL = 500_000
 _LOT_SIZE = 100
 _LOT_RATIO_MAX = 0.10  # 最低売買単位 ≤ 総資本の10%
-
-
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
 
 
 def universe_csv_path() -> Path:
@@ -141,6 +139,35 @@ def value_score(metrics: dict) -> float | None:
     return round(sum(scores) / len(scores), 1) if scores else None
 
 
+def effective_per(info: dict) -> float | None:
+    """trailingPE。赤字企業は yfinance が PE を None で返すため、EPS<0 を検知して
+    -1.0 (= value_score で素点0) に落とす — 赤字銘柄が PER ペナルティを素通りして
+    PBR/配当だけで満点を取るのを防ぐ。EPS も不明なら None (データ欠落扱い)。
+    """
+    per = info.get("trailingPE")
+    if per is not None:
+        return per
+    eps = info.get("trailingEps")
+    if eps is not None and eps < 0:
+        return -1.0
+    return None
+
+
+def dividend_yield_pct(info: dict, price: float | None) -> float | None:
+    """配当利回り (%) を曖昧さなく算出する。
+
+    第一候補: 年間配当額 (dividendRate / trailingAnnualDividendRate) ÷ 株価。
+    フォールバック: dividendYield をパーセント値として採用 (yfinance >= 0.2.54 の
+    規約。旧来の「<1 なら ×100」ヒューリスティックは実利回り 1% 未満の銘柄を
+    100 倍に誤変換するため廃止)。
+    """
+    rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate")
+    if rate and price:
+        return round(rate / price * 100, 2)
+    dy = info.get("dividendYield")
+    return round(float(dy), 2) if dy is not None else None
+
+
 def apply_filters(rows: list[dict], capital: int, market_cap_min: float) -> list[dict]:
     """Lot + market-cap filters, then attach value_score and sort descending."""
     out = []
@@ -148,6 +175,8 @@ def apply_filters(rows: list[dict], capital: int, market_cap_min: float) -> list
         if not lot_filter(r.get("price"), capital):
             continue
         mc = r.get("market_cap")
+        # market_cap 不明は意図的に通す: yfinance の info 欠落で候補を取り逃すより、
+        # 円卓討議の段階で時価総額を再確認するほうが安全 (一次フィルタの思想)
         if mc is not None and mc < market_cap_min:
             continue
         score = value_score(r)
@@ -168,27 +197,35 @@ _INFO_PAUSE_SEC = 0.4      # Stage 2 銘柄間の待機
 _RATE_LIMIT_BACKOFF_SEC = 30.0
 
 
+def _download_chunk_closes(chunk: list[str]):
+    """yf.download 1チャンク分の Close を返す。空 DataFrame (例外なしのレート制限
+    応答) も失敗として raise し、呼び出し側のリトライに乗せる。"""
+    import yfinance as yf
+
+    px = yf.download(chunk, period="5d", interval="1d", progress=False, auto_adjust=False)
+    if px is None or px.empty or "Close" not in px:
+        raise RuntimeError("empty download result (rate limited?)")
+    return px["Close"]
+
+
 def _batch_closes(symbols: list[str]) -> dict[str, float]:
     """Chunked yf.download to avoid rate limits. Returns {symbol: latest close}."""
     import time
-
-    import yfinance as yf
 
     out: dict[str, float] = {}
     for i in range(0, len(symbols), _CHUNK_SIZE):
         chunk = symbols[i:i + _CHUNK_SIZE]
         logger.info("Stage 1: chunk %d-%d / %d ...", i + 1, i + len(chunk), len(symbols))
         try:
-            px = yf.download(chunk, period="5d", interval="1d", progress=False, auto_adjust=False)
+            closes = _download_chunk_closes(chunk)
         except Exception as e:
             logger.warning("chunk download failed (%s) — %ds 待機して1回だけ再試行", e, int(_RATE_LIMIT_BACKOFF_SEC))
             time.sleep(_RATE_LIMIT_BACKOFF_SEC)
             try:
-                px = yf.download(chunk, period="5d", interval="1d", progress=False, auto_adjust=False)
+                closes = _download_chunk_closes(chunk)
             except Exception as e2:
                 logger.error("chunk download failed twice (%s) — %d 銘柄スキップ", e2, len(chunk))
                 continue
-        closes = px["Close"]
         last = closes.iloc[-1] if hasattr(closes, "iloc") else closes
         for sym in chunk:
             try:
@@ -244,19 +281,15 @@ def fetch_metrics(tickers: list[dict], capital: int) -> tuple[list[dict], dict]:
         info = _fetch_info_with_retry(sym)
         if info.get("trailingPE") is not None or info.get("priceToBook") is not None:
             info_ok += 1
-        dy = info.get("dividendYield")
-        # yfinance returns dividendYield either as fraction (0.034) or percent (3.4) by version
-        if dy is not None and dy < 1:
-            dy = dy * 100
         rows.append(
             {
                 "ticker": meta["ticker"],
                 "name": meta["name"],
                 "sector33": meta["sector33"],
                 "price": price,
-                "per": info.get("trailingPE"),
+                "per": effective_per(info),
                 "pbr": info.get("priceToBook"),
-                "dividend_yield_pct": round(dy, 2) if dy is not None else None,
+                "dividend_yield_pct": dividend_yield_pct(info, price),
                 "market_cap": info.get("marketCap"),
             }
         )
@@ -304,7 +337,12 @@ def build_report(candidates: list[dict], capital: int, top: int, today: date, un
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for i, c in enumerate(candidates[:top], 1):
-        per = f"{c['per']:.1f}" if c.get("per") is not None else "—"
+        if c.get("per") is None:
+            per = "—"
+        elif c["per"] <= 0:
+            per = "赤字"
+        else:
+            per = f"{c['per']:.1f}"
         pbr = f"{c['pbr']:.2f}" if c.get("pbr") is not None else "—"
         dy = f"{c['dividend_yield_pct']:.2f}%" if c.get("dividend_yield_pct") is not None else "—"
         lines.append(
@@ -326,22 +364,15 @@ def run(capital: int = _DEFAULT_CAPITAL, top: int = 15, today: date | None = Non
     rows, coverage = fetch_metrics(universe, capital)
     candidates = apply_filters(rows, capital, mc_min)
     report = build_report(candidates, capital, top, today, len(universe), coverage)
-
-    out_dir = repo_root() / "data" / "reports"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"screen-{today.strftime('%Y%m%d')}.md"
-    out_path.write_text(report, encoding="utf-8")
-    print(report)
-    print(f"[saved] {out_path}")
-    return out_path
+    return write_report(f"screen-{today.strftime('%Y%m%d')}.md", report)
 
 
 if __name__ == "__main__":
     import argparse
-    import sys
 
-    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows cp932 対策
+    from src.tools.common import utf8_stdout
+
+    utf8_stdout()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     ap = argparse.ArgumentParser(description="割安株スクリーニング (定量一次フィルタ)")
     ap.add_argument("--refresh-universe", action="store_true", help="JPX 上場一覧を再取得")

@@ -6,6 +6,7 @@ import pytest
 from src.tools import portfolio
 from src.tools.portfolio import (
     add_position,
+    aligned_returns,
     correlation_matrix,
     load_portfolio,
     sector_concentration,
@@ -54,6 +55,39 @@ class TestApprovalGuard:
         with pytest.raises(ValueError):
             add_position("8001", "x", 100, -1.0, "REC-X", "pm", True)
 
+    def test_unapproved_entries_survive_save_roundtrip(self, tmp_path):
+        # 旧バグ: load で弾いた未承認建玉が save で無言削除されていた
+        (tmp_path / "current.yaml").write_text(
+            "capital_assumption_jpy: 500000\n"
+            "positions:\n"
+            "  - {ticker: '9999', name: bad, shares: 100, entry_price: 100,"
+            " approved_by_shareholder: false}\n",
+            encoding="utf-8",
+        )
+        add_position("8001", "伊藤忠", 100, 2050.0, "REC-X", "druckenmiller", True)
+        raw = (tmp_path / "current.yaml").read_text(encoding="utf-8")
+        assert "'9999'" in raw or "9999" in raw  # 未承認分が YAML に残る
+        assert "_unapproved_positions" not in raw  # 内部キーは書き出さない
+        data = load_portfolio()
+        assert [p["ticker"] for p in data["positions"]] == ["8001"]
+        assert [p["ticker"] for p in data["_unapproved_positions"]] == ["9999"]
+
+    def test_duplicate_check_includes_unapproved(self, tmp_path):
+        (tmp_path / "current.yaml").write_text(
+            "positions:\n"
+            "  - {ticker: '9999', name: bad, shares: 100, entry_price: 100,"
+            " approved_by_shareholder: false}\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="既に建玉"):
+            add_position("9999", "dup", 100, 100.0, "REC-X", "pm", True)
+
+    def test_sector_saved(self):
+        add_position("8001", "伊藤忠", 100, 2050.0, "REC-X", "druckenmiller", True,
+                     sector="卸売業")
+        data = load_portfolio()
+        assert data["positions"][0]["sector"] == "卸売業"
+
 
 class TestValuation:
     def _data(self):
@@ -93,6 +127,25 @@ class TestConcentration:
         out = sector_concentration(rows)
         assert out["卸売業"] == 60.0
         assert out["unknown"] == 20.0
+
+
+class TestAlignedReturns:
+    def test_common_dates_only(self):
+        # B に欠損日 (01-02) があっても共通日付の積集合上でリターンを取る
+        a = [("2026-01-01", 100.0), ("2026-01-02", 110.0), ("2026-01-03", 121.0)]
+        b = [("2026-01-01", 200.0), ("2026-01-03", 220.0)]
+        out = aligned_returns({"A": a, "B": b})
+        assert out["A"] == pytest.approx([0.21])   # 100 → 121 (01-02 を飛ばす)
+        assert out["B"] == pytest.approx([0.10])   # 200 → 220
+        assert len(out["A"]) == len(out["B"])
+
+    def test_same_dates_normal_returns(self):
+        a = [("2026-01-01", 100.0), ("2026-01-02", 102.0)]
+        out = aligned_returns({"A": a})
+        assert out["A"] == pytest.approx([0.02])
+
+    def test_empty(self):
+        assert aligned_returns({}) == {}
 
 
 class TestCorrelation:

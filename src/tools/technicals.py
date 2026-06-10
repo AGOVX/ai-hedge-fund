@@ -31,15 +31,17 @@ class Technicals:
     dma200: float | None            # None when < 200 bars of history
     above_dma200: bool | None
     dma200_distance_pct: float | None   # (close - dma200) / dma200 * 100
-    high_52w: float                 # max close of trailing 252 bars (incl. today)
+    high_52w: float                 # max close of trailing 252 bars (incl. today);
+                                    # 252 バー未満の銘柄は手持ち全期間 (bars 参照)
     low_52w: float
     high_52w_prior: float           # max close EXCLUDING the latest bar (breakout ref)
     low_52w_prior: float
     pct_from_52w_high: float        # (close - high_52w_prior) / high_52w_prior * 100
     volume_ratio_20d: float | None  # latest volume / 20-day avg volume
-    breakout_52w_high: bool         # close > prior 52w high
+    breakout_52w_high: bool         # close > prior 52w high (252バー揃うまで常に False)
     breakout_volume_confirmed: bool # breakout AND volume >= 1.5x 20d avg
-    breakdown_52w_low: bool         # close < prior 52w low
+    breakdown_52w_low: bool         # close < prior 52w low (252バー揃うまで常に False)
+    bars: int = 0                   # 計算に使ったバー数 (上場1年未満の検知用)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -70,16 +72,19 @@ def compute_technicals(ticker: str, prices: list) -> Technicals | None:
     window = closes[-252:]
     high_52w = max(window)
     low_52w = min(window)
-    prior_window = closes[-253:-1] if len(closes) > 1 else closes
-    high_prior = max(prior_window[-252:])
-    low_prior = min(prior_window[-252:])
+    prior_window = closes[-253:-1]  # up to 252 bars excluding the latest (>=19 bars here)
+    high_prior = max(prior_window)
+    low_prior = min(prior_window)
 
     # Volume confirmation
     vol20 = [v for v in volumes[-21:-1] if v]  # previous 20 bars, skip zero/None
     vol_ratio = (volumes[-1] / (sum(vol20) / len(vol20))) if vol20 and volumes[-1] else None
 
-    breakout = latest_close > high_prior
-    breakdown = latest_close < low_prior
+    # 上場1年未満 (252バー未満) は「52週」窓が不完全 — 新値のたびに偽ブレイクアウトに
+    # なるため、フル窓が揃うまでブレイク判定を抑止する
+    full_window = len(closes) >= 252
+    breakout = full_window and latest_close > high_prior
+    breakdown = full_window and latest_close < low_prior
 
     return Technicals(
         ticker=ticker,
@@ -97,6 +102,7 @@ def compute_technicals(ticker: str, prices: list) -> Technicals | None:
         breakout_52w_high=breakout,
         breakout_volume_confirmed=breakout and vol_ratio is not None and vol_ratio >= _VOLUME_CONFIRM_RATIO,
         breakdown_52w_low=breakdown,
+        bars=len(closes),
     )
 
 

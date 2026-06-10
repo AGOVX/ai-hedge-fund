@@ -17,9 +17,9 @@ import argparse
 import logging
 import sys
 
-if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows cp932 対策
+from src.tools.common import utf8_stdout
 
+utf8_stdout()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 _BUFFETT_ITEMS = [
