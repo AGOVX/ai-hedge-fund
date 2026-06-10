@@ -7,6 +7,7 @@ from src.tools import portfolio
 from src.tools.portfolio import (
     add_position,
     aligned_returns,
+    append_equity_snapshot,
     correlation_matrix,
     load_portfolio,
     sector_concentration,
@@ -127,6 +128,31 @@ class TestConcentration:
         out = sector_concentration(rows)
         assert out["卸売業"] == 60.0
         assert out["unknown"] == 20.0
+
+
+class TestEquityCurve:
+    _VAL = {"equity_jpy": 500_000, "cash_jpy": 500_000,
+            "positions_value_jpy": 0, "unrealized_pl_jpy": 0}
+
+    def test_same_day_rerun_replaces_row(self, tmp_path):
+        # 定期実行 + 手動実行が同日に重なっても1行に保つ
+        append_equity_snapshot(self._VAL, 410.2, note="run1")
+        append_equity_snapshot(self._VAL, 410.6, note="run2")
+        lines = (tmp_path / "equity-curve.csv").read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 2  # header + 1行
+        assert "run2" in lines[1] and "410.6" in lines[1]
+
+    def test_past_rows_preserved(self, tmp_path):
+        (tmp_path / "equity-curve.csv").write_text(
+            "date,equity_jpy,cash_jpy,positions_value_jpy,"
+            "realized_pl_cum_jpy,unrealized_pl_jpy,topix_close,note\n"
+            "2026-05-12,500000,500000,0,0,0,,initial baseline\n",
+            encoding="utf-8",
+        )
+        append_equity_snapshot(self._VAL, None, note="today")
+        lines = (tmp_path / "equity-curve.csv").read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 3
+        assert "2026-05-12" in lines[1]
 
 
 class TestAlignedReturns:

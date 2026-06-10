@@ -20,19 +20,17 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import yaml
+
+from src.tools.common import repo_root, write_report
 
 logger = logging.getLogger(__name__)
 
 _DUE_SOON_DAYS = 7
 _DISCLOSURE_LOOKBACK_DAYS = 14
-
-
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
 
 
 def watchlist_path() -> Path:
@@ -58,7 +56,13 @@ def check_review_due(entry: dict, today: date) -> dict:
     raw = entry.get("next_review_due")
     if raw is None:
         return {"status": "unset", "due": None, "days_left": None}
-    due = raw if isinstance(raw, date) else date.fromisoformat(str(raw))
+    # datetime は date のサブクラスなので先に判定する (datetime - date は TypeError)
+    if isinstance(raw, datetime):
+        due = raw.date()
+    elif isinstance(raw, date):
+        due = raw
+    else:
+        due = date.fromisoformat(str(raw)[:10])
     days_left = (due - today).days
     if days_left < 0:
         status = "overdue"
@@ -175,10 +179,12 @@ def build_report(
         tech = technicals_by_ticker.get(ticker)
         alerts = check_technical_signals(e, tech)
         if tech is not None:
-            pos = "上" if tech.above_dma200 else "下"
-            dma = f"{tech.dma200:,.0f}" if tech.dma200 is not None else "n/a"
+            if tech.above_dma200 is None:
+                dma_part = "200DMA n/a (履歴200日未満)"
+            else:
+                dma_part = f"200DMA {tech.dma200:,.0f} の{'上' if tech.above_dma200 else '下'}"
             lines.append(
-                f"- 終値 {tech.close:,.0f} ({tech.as_of}) / 200DMA {dma} の{pos} / "
+                f"- 終値 {tech.close:,.0f} ({tech.as_of}) / {dma_part} / "
                 f"52週高値 {tech.high_52w:,.0f} 安値 {tech.low_52w:,.0f} / 高値乖離 {tech.pct_from_52w_high:+.1f}%"
             )
         for a in alerts:
@@ -231,22 +237,15 @@ def run(no_net: bool = False, today: date | None = None) -> Path:
             disclosures_by_ticker[ticker] = list_disclosures(ticker, limit=30)
 
     report = build_report(entries, today, technicals_by_ticker, disclosures_by_ticker)
-
-    out_dir = repo_root() / "data" / "reports"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"watchlist-check-{today.strftime('%Y%m%d')}.md"
-    out_path.write_text(report, encoding="utf-8")
-    print(report)
-    print(f"[saved] {out_path}")
-    return out_path
+    return write_report(f"watchlist-check-{today.strftime('%Y%m%d')}.md", report)
 
 
 if __name__ == "__main__":
     import argparse
-    import sys
 
-    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows cp932 対策
+    from src.tools.common import utf8_stdout
+
+    utf8_stdout()
     logging.basicConfig(level=logging.WARNING)
     ap = argparse.ArgumentParser(description="Watch List 自動点検")
     ap.add_argument("--no-net", action="store_true", help="ネットワークを使わず期日チェックのみ")

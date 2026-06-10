@@ -246,21 +246,31 @@ def append_equity_snapshot(
     note: str = "",
     realized_pl_cum_jpy: float = 0.0,
 ) -> None:
-    """equity-curve.csv に1行追記。realized_pl_cum_jpy は current.yaml の
-    トップレベルキー (建玉クローズ時に手動更新) から渡す。"""
+    """equity-curve.csv に1行追記。同日の既存行は上書き (定期実行 + 手動実行の
+    重複防止)。realized_pl_cum_jpy は current.yaml のトップレベルキー
+    (建玉クローズ時に手動更新) から渡す。"""
     p = equity_curve_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    exists = p.exists()
-    with p.open("a", encoding="utf-8", newline="") as f:
+    header = ["date", "equity_jpy", "cash_jpy", "positions_value_jpy",
+              "realized_pl_cum_jpy", "unrealized_pl_jpy", "topix_close", "note"]
+    today = str(date.today())
+    rows: list[list[str]] = []
+    if p.exists():
+        # utf-8-sig: 手動編集等で BOM が付いてもヘッダー判定を誤らない
+        with p.open("r", encoding="utf-8-sig", newline="") as f:
+            rows = [r for r in csv.reader(f) if r]
+        if rows and rows[0][0] == "date":
+            rows = rows[1:]
+        rows = [r for r in rows if r[0] != today]  # 同日行は最新で置換
+    rows.append([
+        today, valuation["equity_jpy"], valuation["cash_jpy"],
+        valuation["positions_value_jpy"], realized_pl_cum_jpy, valuation["unrealized_pl_jpy"],
+        round(topix_close, 2) if topix_close is not None else "", note,
+    ])
+    with p.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        if not exists:
-            w.writerow(["date", "equity_jpy", "cash_jpy", "positions_value_jpy",
-                        "realized_pl_cum_jpy", "unrealized_pl_jpy", "topix_close", "note"])
-        w.writerow([
-            str(date.today()), valuation["equity_jpy"], valuation["cash_jpy"],
-            valuation["positions_value_jpy"], realized_pl_cum_jpy, valuation["unrealized_pl_jpy"],
-            topix_close if topix_close is not None else "", note,
-        ])
+        w.writerow(header)
+        w.writerows(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -281,10 +291,10 @@ def _fetch_latest_prices(tickers: list[str]) -> dict[str, float]:
 
 
 def _fetch_topix_proxy() -> float | None:
-    """TOPIX 終値 (^TPX が無い環境では 1306.T ETF を代理に使う)."""
+    """TOPIX 終値 (yfinance に ^TPX が無いため 1306.T ETF 代理を先に試す)."""
     import yfinance as yf
 
-    for sym in ("^TPX", "1306.T"):
+    for sym in ("1306.T", "^TPX"):
         try:
             h = yf.Ticker(sym).history(period="5d")
             if h is not None and not h.empty:
