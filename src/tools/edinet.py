@@ -29,8 +29,15 @@ import logging
 import os
 import re
 from functools import lru_cache
+from pathlib import Path
+
+from src.tools import filings_store
 
 logger = logging.getLogger(__name__)
+
+# doc_id of the latest fetched Securities Report per ticker, populated by
+# _fetch_latest_securities_report (stays empty when that function is mocked).
+_DOC_IDS: dict[str, str] = {}
 
 # Top-level imports of edinet_tools are deferred to inside functions so that
 # environments missing the package (or missing the API key) still allow the
@@ -114,6 +121,10 @@ def _fetch_latest_securities_report(ticker: str, max_age_days: int = 540):
         logger.warning("No Securities Report found for %s in last %d days", ticker, max_age_days)
         return None
 
+    doc_id = getattr(docs[0], "doc_id", None)
+    if doc_id:
+        _DOC_IDS[ticker] = str(doc_id)
+
     # documents() typically returns newest-first
     try:
         report = docs[0].parse()
@@ -162,7 +173,19 @@ def get_line_items_for_ticker(ticker: str, requested: list[str]) -> dict | None:
     Returns None if EDINET fetch failed entirely (no key, no docs, parse error).
     Returns dict with all requested items (None for items we couldn't resolve)
     when at least one item was extracted.
+
+    Persistent cache: extracted payloads are stored via filings_store, so a
+    second call (even in a new process) is served from SQLite without hitting
+    EDINET. Cache TTL is EDINET_CACHE_DAYS (default 30).
     """
+    cache_days = int(os.environ.get("EDINET_CACHE_DAYS", "30"))
+    cached = filings_store.load_line_items(ticker, max_age_days=cache_days)
+    if cached is not None and all(k in cached for k in requested):
+        logger.info("EDINET line-items cache hit for %s (period=%s)", ticker, cached.get("report_period"))
+        return {k: cached[k] for k in requested} | {
+            k: cached.get(k) for k in ("report_period", "currency", "accounting_standard")
+        }
+
     report = _fetch_latest_securities_report(ticker)
     if report is None:
         return None
@@ -203,7 +226,81 @@ def get_line_items_for_ticker(ticker: str, requested: list[str]) -> dict | None:
             guesses = [buffett_name, _snake_to_pascal(buffett_name)]
             result[buffett_name] = _find_raw(report, guesses)
 
+    # Persist so future runs (any process) skip the EDINET round-trip
+    doc_id = _DOC_IDS.get(ticker) or f"period-{result.get('report_period') or 'unknown'}"
+    try:
+        filings_store.save_line_items(ticker, doc_id, result)
+    except Exception as e:
+        logger.warning("Failed to persist line items for %s: %s", ticker, e)
+
     return result
+
+
+# ---------------------------------------------------------------------------
+# 有報 PDF download (qualitative sections: 経営方針 / リスク / MD&A)
+# ---------------------------------------------------------------------------
+
+_EDINET_DOC_URL = "https://api.edinet-fsa.go.jp/api/v2/documents/{doc_id}"
+
+
+def fetch_yuho_pdf(ticker: str) -> Path | None:
+    """Download the latest Securities Report PDF for a ticker; cached on disk.
+
+    Returns the local PDF path or None (no key / no filing / download failure).
+    A second call for the same doc_id is served from filings_store without
+    network access.
+    """
+    if not _has_api_key():
+        logger.warning("EDINET_API_KEY not set — fetch_yuho_pdf skipped.")
+        cached = filings_store.find_filing(ticker, doc_type="yuho_pdf", source="edinet")
+        return Path(cached["file_path"]) if cached else None
+
+    # Resolve the latest doc_id (also warms the line-items fetch path)
+    report = _fetch_latest_securities_report(ticker)
+    doc_id = _DOC_IDS.get(ticker)
+    if doc_id is None:
+        logger.warning("No EDINET doc_id resolved for %s — cannot fetch PDF", ticker)
+        cached = filings_store.find_filing(ticker, doc_type="yuho_pdf", source="edinet")
+        return Path(cached["file_path"]) if cached else None
+
+    cached = filings_store.find_filing(ticker, doc_type="yuho_pdf", source="edinet")
+    if cached and cached["doc_id"] == doc_id:
+        logger.info("有報 PDF cache hit for %s: %s", ticker, cached["file_path"])
+        return Path(cached["file_path"])
+
+    import httpx
+
+    try:
+        resp = httpx.get(
+            _EDINET_DOC_URL.format(doc_id=doc_id),
+            params={"type": "2", "Subscription-Key": os.environ["EDINET_API_KEY"]},
+            timeout=60.0,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        logger.warning("EDINET PDF download failed for %s docID=%s: %s", ticker, doc_id, e)
+        return Path(cached["file_path"]) if cached else None
+
+    if not resp.content.startswith(b"%PDF"):
+        logger.warning("EDINET returned non-PDF content for %s docID=%s — discarding", ticker, doc_id)
+        return Path(cached["file_path"]) if cached else None
+
+    dest = filings_store.ticker_dir(ticker) / f"{doc_id}_yuho.pdf"
+    dest.write_bytes(resp.content)
+
+    fy_end = getattr(report, "fiscal_year_end", None) if report is not None else None
+    filings_store.record_filing(
+        ticker=ticker,
+        source="edinet",
+        doc_type="yuho_pdf",
+        doc_id=doc_id,
+        file_path=dest,
+        period=fy_end.isoformat() if fy_end else None,
+        title="有価証券報告書",
+    )
+    logger.info("Downloaded 有報 PDF for %s: %s", ticker, dest)
+    return dest
 
 
 _SNAKE_RE = re.compile(r"_([a-z])")

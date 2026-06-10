@@ -19,6 +19,12 @@ from src.tools.edinet import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_filings_dir(tmp_path, monkeypatch):
+    """Point the persistent filings store at a temp dir so tests never touch data/filings."""
+    monkeypatch.setenv("FILINGS_DIR", str(tmp_path / "filings"))
+
+
 class TestHasApiKey:
     def test_unset(self, monkeypatch):
         monkeypatch.delenv("EDINET_API_KEY", raising=False)
@@ -215,3 +221,49 @@ class TestGetLineItemsForTickerWithMockedFetch:
         mock_fetch.return_value = None
         out = get_line_items_for_ticker("4751", ["revenue"])
         assert out is None
+
+
+class TestPersistentCache:
+    """Extracted line items survive across calls via filings_store (no re-fetch)."""
+
+    def _make_report(self):
+        report = MagicMock()
+        report.fiscal_year_end = date(2025, 9, 30)
+        report.accounting_standard = "Japan GAAP"
+        report.net_sales = 720_000_000_000
+        report.net_income = 30_000_000_000
+        report.total_assets = None
+        report.total_liabilities = None
+        report.net_assets = None
+        report.depreciation_amortization = None
+        report.operating_cash_flow = None
+        report.investing_cash_flow = None
+        report.raw_fields = {}
+        return report
+
+    @patch("src.tools.edinet._fetch_latest_securities_report")
+    def test_second_call_served_from_store(self, mock_fetch):
+        mock_fetch.return_value = self._make_report()
+
+        out1 = get_line_items_for_ticker("4751", ["revenue", "net_income"])
+        assert out1["revenue"] == 720_000_000_000.0
+        assert mock_fetch.call_count == 1
+
+        # Simulate a fresh process: fetch now fails, but the store answers
+        mock_fetch.return_value = None
+        out2 = get_line_items_for_ticker("4751", ["revenue", "net_income"])
+        assert out2 is not None
+        assert out2["revenue"] == 720_000_000_000.0
+        assert out2["report_period"] == "2025-09-30"
+        # No additional successful fetch was needed
+        assert mock_fetch.call_count == 1
+
+    @patch("src.tools.edinet._fetch_latest_securities_report")
+    def test_cache_miss_when_new_items_requested(self, mock_fetch):
+        mock_fetch.return_value = self._make_report()
+        get_line_items_for_ticker("4751", ["revenue"])
+        assert mock_fetch.call_count == 1
+
+        # Requesting an item not in the cached payload must re-fetch
+        get_line_items_for_ticker("4751", ["revenue", "gross_profit"])
+        assert mock_fetch.call_count == 2
