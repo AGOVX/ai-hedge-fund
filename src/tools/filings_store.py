@@ -54,6 +54,17 @@ CREATE TABLE IF NOT EXISTS line_items (
     fetched_at  TEXT NOT NULL,
     PRIMARY KEY (ticker, doc_id)
 );
+CREATE TABLE IF NOT EXISTS interim_items (
+    -- 半期/四半期 (160/140) の中間決算。年次 line_items とは分離して保存し、
+    -- --history の通年 ROE 系列に半期値が混入するのを防ぐ。
+    ticker      TEXT NOT NULL,
+    doc_id      TEXT NOT NULL,
+    period      TEXT,                     -- 中間期末 (YYYY-MM-DD)
+    period_type TEXT,                     -- 'HY' | 'Q1' | 'Q2' | 'Q3' など
+    payload     TEXT NOT NULL,            -- JSON dict (当期 + 前年同期 + メタ)
+    fetched_at  TEXT NOT NULL,
+    PRIMARY KEY (ticker, doc_id)
+);
 """
 
 
@@ -244,4 +255,50 @@ def load_line_items_by_doc(ticker: str, doc_id: str) -> dict | None:
     try:
         return json.loads(row["payload"])
     except (json.JSONDecodeError, TypeError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Interim (半期/四半期) line items — 年次 line_items とは別テーブルで管理
+# ---------------------------------------------------------------------------
+
+def save_interim_items(ticker: str, doc_id: str, payload: dict) -> None:
+    """半期/四半期の中間決算 payload を保存 (年次履歴を汚さない)。"""
+    with closing(_connect()) as conn, conn:
+        conn.execute(
+            """
+            INSERT INTO interim_items (ticker, doc_id, period, period_type, payload, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (ticker, doc_id) DO UPDATE SET
+                payload    = excluded.payload,
+                period     = excluded.period,
+                period_type = excluded.period_type,
+                fetched_at = excluded.fetched_at
+            """,
+            (ticker, doc_id, payload.get("report_period"),
+             payload.get("period_type"), json.dumps(payload), _now_iso()),
+        )
+
+
+def load_latest_interim(ticker: str) -> dict | None:
+    """最新の中間期 (period 降順) の payload を返す。なければ None。TTL なし。
+
+    中間決算ドキュメントは不変なので TTL は持たない。新しい四半期の発見は
+    呼び出し側 (edinet) が period_end の鮮度を見て再プローブするか判断する。
+    """
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            """
+            SELECT payload FROM interim_items
+            WHERE ticker = ?
+            ORDER BY period DESC, fetched_at DESC LIMIT 1
+            """,
+            (ticker,),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(row["payload"])
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning("Corrupt cached interim_items for %s: %s", ticker, e)
         return None

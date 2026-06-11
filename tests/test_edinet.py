@@ -12,10 +12,12 @@ import pytest
 from src.tools import edinet, filings_store
 from src.tools.edinet import (
     _as_float,
+    _extract_interim,
     _find_raw,
     _has_api_key,
     _snake_to_pascal,
     build_history_report,
+    build_interim_report,
     get_line_items_for_ticker,
     get_line_items_history,
 )
@@ -336,3 +338,109 @@ class TestBuildHistoryReport:
         rep = build_history_report("8001", [{"report_period": "2026-03-31"}])
         assert "—" in rep
         assert "ROE: 平均" not in rep  # ROE 計算不能なら集計行なし
+
+
+class _FakeFact:
+    """raw_facts の Fact (element_id / context_id / value) を模す。"""
+    def __init__(self, element_id, context_id, value):
+        self.element_id = element_id
+        self.context_id = context_id
+        self.value = value
+
+
+class _FakeInterimReport:
+    """半期報告書 parse() 結果の最小モック (4751 FY2026 上期の実値ベース)。"""
+    doc_type_code = "160"
+
+    def __init__(self):
+        self.period_start = date(2025, 10, 1)
+        self.period_end = date(2026, 3, 31)
+        self.raw_fields = {
+            "jpdei_cor:TypeOfCurrentPeriodDEI": "HY",
+            "jpdei_cor:CurrentFiscalYearEndDateDEI": "2026-09-30",
+            "jpdei_cor:ComparativePeriodEndDateDEI": "2025-03-31",
+        }
+        self.raw_facts = [
+            # 当中間期 (連結, InterimDuration)
+            _FakeFact("jppfs_cor:NetSales", "InterimDuration", 478584000000),
+            _FakeFact("jppfs_cor:OperatingIncome", "InterimDuration", 52459000000),
+            _FakeFact("jppfs_cor:ProfitLossAttributableToOwnersOfParent", "InterimDuration", 27336000000),
+            _FakeFact("jppfs_cor:ProfitLoss", "InterimDuration", 35584000000),  # 親株主版を優先すべき
+            _FakeFact("jppfs_cor:NetCashProvidedByUsedInOperatingActivities", "InterimDuration", 19612000000),
+            _FakeFact("jppfs_cor:NetCashProvidedByUsedInInvestmentActivities", "InterimDuration", -48104000000),
+            # セグメント別内訳 (_接尾辞) — 拾ってはいけない
+            _FakeFact("jppfs_cor:NetSales", "InterimDuration_GameSegmentMember", 132227000000),
+            # 当期末BS (連結, InterimInstant)
+            _FakeFact("jppfs_cor:Assets", "InterimInstant", 556509000000),
+            _FakeFact("jppfs_cor:NetAssets", "InterimInstant", 284384000000),
+            # 前期末BS — 拾ってはいけない
+            _FakeFact("jppfs_cor:Assets", "Prior1YearInstant", 557162000000),
+            _FakeFact("jppfs_cor:NetAssets", "Prior1YearInstant", 275681000000),
+            # 前年同期 (Prior1InterimDuration)
+            _FakeFact("jppfs_cor:NetSales", "Prior1InterimDuration", 421214000000),
+            _FakeFact("jppfs_cor:OperatingIncome", "Prior1InterimDuration", 29169000000),
+            _FakeFact("jppfs_cor:ProfitLossAttributableToOwnersOfParent", "Prior1InterimDuration", 15863000000),
+            _FakeFact("jppfs_cor:NetCashProvidedByUsedInOperatingActivities", "Prior1InterimDuration", 23786000000),
+            _FakeFact("jppfs_cor:NetCashProvidedByUsedInInvestmentActivities", "Prior1InterimDuration", -9952000000),
+        ]
+
+
+class TestExtractInterim:
+    def setup_method(self):
+        self.out = _extract_interim(_FakeInterimReport())
+
+    def test_period_metadata(self):
+        assert self.out["report_period"] == "2026-03-31"
+        assert self.out["period_start"] == "2025-10-01"
+        assert self.out["period_type"] == "HY"
+        assert self.out["fiscal_year_end"] == "2026-09-30"
+        assert self.out["cumulative"] is True
+
+    def test_current_period_consolidated(self):
+        # 当中間期・連結の InterimDuration を拾う (前年/単体/セグメントではない)
+        assert self.out["revenue"] == 478584000000
+        assert self.out["operating_income"] == 52459000000
+
+    def test_net_income_prefers_owners(self):
+        # ProfitLoss(35,584) ではなく親会社株主帰属(27,336)を優先
+        assert self.out["net_income"] == 27336000000
+
+    def test_segment_breakdown_excluded(self):
+        # _GameSegmentMember (132,227) を売上に混入させない
+        assert self.out["revenue"] != 132227000000
+
+    def test_balance_sheet_current_instant(self):
+        # InterimInstant を拾う (Prior1YearInstant 557,162 ではない)
+        assert self.out["total_assets"] == 556509000000
+        assert self.out["net_assets"] == 284384000000
+
+    def test_fcf_and_equity_ratio(self):
+        assert self.out["free_cash_flow"] == 19612000000 + (-48104000000)
+        assert self.out["equity_ratio_pct"] == round(284384000000 / 556509000000 * 100, 1)
+
+    def test_prior_year_same_period(self):
+        prior = self.out["prior"]
+        assert prior["report_period"] == "2025-03-31"
+        assert prior["revenue"] == 421214000000
+        assert prior["net_income"] == 15863000000
+        assert prior["free_cash_flow"] == 23786000000 + (-9952000000)
+
+
+class TestBuildInterimReport:
+    def test_yoy_table(self):
+        payload = _extract_interim(_FakeInterimReport())
+        rep = build_interim_report("4751", payload)
+        assert "最新中間決算 — 4751" in rep
+        assert "2025-10-01 〜 2026-03-31" in rep
+        assert "中間累計値である点に注意" in rep
+        # 売上 4,786億 vs 4,212億 → +13.6%
+        assert "| 売上高 | 4,786 | 4,212 | +13.6% |" in rep
+        # 営業利益 YoY (+79.8%) — mapped属性の前年混同バグが直っていることの確認
+        assert "+79.8%" in rep
+        assert "自己資本比率 51.1%" in rep
+
+    def test_missing_prior_safe(self):
+        payload = {"report_period": "2026-03-31", "period_start": "2025-10-01",
+                   "period_type": "HY", "revenue": 100e8, "prior": {}}
+        rep = build_interim_report("9999", payload)
+        assert "| 売上高 | 100 | — | — |" in rep

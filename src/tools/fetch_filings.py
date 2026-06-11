@@ -50,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--items", action="store_true", help="XBRL 12項目抽出のみ (EDINET, 要キー)")
     p.add_argument("--history", type=int, nargs="?", const=10, default=None, metavar="N",
                    help="過去 N 期分 (既定10) の財務時系列を取得・表示 (EDINET, 要キー)")
+    p.add_argument("--interim", action="store_true",
+                   help="最新の中間決算 (半期報告書, 当期 vs 前年同期) を取得・表示 (EDINET, 要キー)")
     p.add_argument("--list", action="store_true", help="キャッシュ済みドキュメント一覧を表示")
     args = p.parse_args(argv)
 
@@ -66,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.tickers:
         p.error("ticker を指定してください (または --list)")
 
-    do_all = not (args.tanshin or args.yuho or args.items or args.history)
+    do_all = not (args.tanshin or args.yuho or args.items or args.history or args.interim)
     failures = 0
 
     for ticker in args.tickers:
@@ -77,6 +79,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(edinet.build_history_report(ticker, rows))
             else:
                 print("  財務時系列 : 取得失敗 (EDINET_API_KEY 未設定?)")
+                failures += 1
+        if args.interim:
+            payload = edinet.get_latest_interim_for_ticker(ticker)
+            if payload and payload.get("report_period"):
+                print(edinet.build_interim_report(ticker, payload))
+            else:
+                print("  中間決算   : 取得失敗 (半期報告書なし / EDINET_API_KEY 未設定?)")
                 failures += 1
         if do_all or args.tanshin:
             path = tdnet.download_kessan_tanshin(ticker)

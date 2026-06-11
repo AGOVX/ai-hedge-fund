@@ -126,3 +126,31 @@ class TestLineItemsHistory:
 
     def test_load_by_doc_unknown(self):
         assert filings_store.load_line_items_by_doc("8001", "NOPE") is None
+
+
+class TestInterimItems:
+    def test_save_and_load_latest(self):
+        filings_store.save_interim_items(
+            "4751", "DOCH1", {"report_period": "2026-03-31", "period_type": "HY", "revenue": 478584e6}
+        )
+        out = filings_store.load_latest_interim("4751")
+        assert out["report_period"] == "2026-03-31"
+        assert out["revenue"] == 478584e6
+
+    def test_latest_period_wins(self):
+        filings_store.save_interim_items("4751", "OLD", {"report_period": "2025-03-31", "revenue": 1.0})
+        time.sleep(0.01)
+        filings_store.save_interim_items("4751", "NEW", {"report_period": "2026-03-31", "revenue": 2.0})
+        assert filings_store.load_latest_interim("4751")["report_period"] == "2026-03-31"
+
+    def test_unknown_ticker(self):
+        assert filings_store.load_latest_interim("0000") is None
+
+    def test_isolated_from_line_items(self):
+        # 中間データは年次 line_items / history を一切汚染しない
+        filings_store.save_interim_items("4751", "DOCH1", {"report_period": "2026-03-31", "revenue": 1.0})
+        filings_store.save_line_items("4751", "FY", {"report_period": "2025-09-30", "revenue": 9.0})
+        assert filings_store.load_line_items("4751")["report_period"] == "2025-09-30"
+        assert filings_store.load_line_items_history("4751") == [
+            {"report_period": "2025-09-30", "revenue": 9.0}
+        ]

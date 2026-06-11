@@ -467,6 +467,240 @@ def build_history_report(ticker: str, payloads: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 中間決算 (半期報告書 160) — 通年有報より新しい最新四半期/半期の実績
+# ---------------------------------------------------------------------------
+#
+# 日本は2024年4月に四半期報告書(140)を廃止し、半期報告書(160, EDINET) +
+# 四半期決算短信(TDnet) に移行した。半期報告書には当中間期の連結 XBRL が
+# 含まれ、有報と同じ精度で売上/利益/CF/BS が取れる。
+#
+# edinet_tools の mapped 属性 (report.operating_income 等) は中間報告書では
+# *前年同期* のコンテキストを拾うことがあり信頼できない。必ず raw_facts を
+# context_id で明示選択する (InterimDuration = 当中間期, InterimInstant = 当期末)。
+
+_INTERIM_DOC_TYPE = "160"            # 半期報告書 (2024年4月以降の中間開示)
+_INTERIM_MAX_BACK_DAYS = 300         # 最新半期報告書を遡って探す上限
+_INTERIM_STALE_DAYS = 100            # キャッシュの期末がこれより古ければ再プローブ
+
+# 当中間期 / 前年同期 を表す context_id (優先順)。_接尾辞 (セグメント別) は除外。
+_CUR_DURATION_CTX = ("InterimDuration", "CurrentYTDDuration", "CurrentQuarterDuration")
+_CUR_INSTANT_CTX = ("InterimInstant", "CurrentQuarterInstant", "CurrentYTDInstant")
+_PRIOR_DURATION_CTX = ("Prior1InterimDuration", "Prior1YTDDuration", "Prior1QuarterDuration")
+_PRIOR_INSTANT_CTX = ("Prior1YearInstant", "Prior1InterimInstant", "Prior1QuarterInstant")
+
+# Buffett 項目 → XBRL 要素ローカル名 (先頭が優先)。BS は instant、他は duration。
+_INTERIM_FLOW_ELEMS = {
+    "revenue": ("NetSales", "RevenuesFromExternalCustomers", "OperatingRevenue", "Revenue"),
+    "operating_income": ("OperatingIncome",),
+    "ordinary_income": ("OrdinaryIncome",),
+    "net_income": ("ProfitLossAttributableToOwnersOfParent", "ProfitLoss"),
+    "operating_cf": ("NetCashProvidedByUsedInOperatingActivities",),
+    "investing_cf": ("NetCashProvidedByUsedInInvestmentActivities",
+                     "NetCashProvidedByUsedInInvestingActivities"),
+}
+_INTERIM_STOCK_ELEMS = {
+    "total_assets": ("Assets",),
+    "net_assets": ("NetAssets",),
+}
+
+
+def _interim_fact_index(report) -> dict:
+    """raw_facts を {(要素ローカル名, context_id): float} に索引化する。"""
+    idx: dict = {}
+    for f in getattr(report, "raw_facts", None) or []:
+        eid = str(getattr(f, "element_id", ""))
+        local = eid.split(":")[-1]
+        ctx = str(getattr(f, "context_id", ""))
+        val = _as_float(getattr(f, "value", None))
+        if val is not None:
+            idx[(local, ctx)] = val
+    return idx
+
+
+def _pick_fact(idx: dict, elems: tuple[str, ...], contexts: tuple[str, ...]):
+    """要素優先 × コンテキスト優先で最初に一致した値を返す (なければ None)。"""
+    for el in elems:
+        for ctx in contexts:
+            if (el, ctx) in idx:
+                return idx[(el, ctx)]
+    return None
+
+
+def _extract_interim(report) -> dict:
+    """半期報告書 (parsed) から当中間期の連結値を context 明示で抽出する。"""
+    idx = _interim_fact_index(report)
+
+    def cur_flow(key):
+        return _pick_fact(idx, _INTERIM_FLOW_ELEMS[key], _CUR_DURATION_CTX)
+
+    def cur_stock(key):
+        return _pick_fact(idx, _INTERIM_STOCK_ELEMS[key], _CUR_INSTANT_CTX)
+
+    out: dict = {}
+    pe = getattr(report, "period_end", None)
+    ps = getattr(report, "period_start", None)
+    out["report_period"] = pe.isoformat() if pe else None
+    out["period_start"] = ps.isoformat() if ps else None
+    out["currency"] = "JPY"
+    out["cumulative"] = True  # 中間期の損益・CF は期初からの累計
+
+    # DEI メタ (期種別・通期末)
+    raw = getattr(report, "raw_fields", None) or {}
+    out["period_type"] = str(raw.get("jpdei_cor:TypeOfCurrentPeriodDEI") or "").strip() or None
+    fye = raw.get("jpdei_cor:CurrentFiscalYearEndDateDEI")
+    out["fiscal_year_end"] = str(fye) if fye else None
+    out["doc_type_code"] = str(getattr(report, "doc_type_code", "") or "") or None
+
+    for key in _INTERIM_FLOW_ELEMS:
+        out[key] = cur_flow(key)
+    for key in _INTERIM_STOCK_ELEMS:
+        out[key] = cur_stock(key)
+
+    ocf, icf = out.get("operating_cf"), out.get("investing_cf")
+    out["free_cash_flow"] = (ocf + icf) if (ocf is not None and icf is not None) else None
+    ta, na = out.get("total_assets"), out.get("net_assets")
+    out["equity_ratio_pct"] = round(na / ta * 100, 1) if (na is not None and ta) else None
+
+    # 前年同期 (YoY 比較用)
+    prior = {
+        "report_period": _prior_period_end(report),
+        "revenue": _pick_fact(idx, _INTERIM_FLOW_ELEMS["revenue"], _PRIOR_DURATION_CTX),
+        "operating_income": _pick_fact(idx, _INTERIM_FLOW_ELEMS["operating_income"], _PRIOR_DURATION_CTX),
+        "net_income": _pick_fact(idx, _INTERIM_FLOW_ELEMS["net_income"], _PRIOR_DURATION_CTX),
+        "operating_cf": _pick_fact(idx, _INTERIM_FLOW_ELEMS["operating_cf"], _PRIOR_DURATION_CTX),
+        "investing_cf": _pick_fact(idx, _INTERIM_FLOW_ELEMS["investing_cf"], _PRIOR_DURATION_CTX),
+    }
+    pocf, picf = prior["operating_cf"], prior["investing_cf"]
+    prior["free_cash_flow"] = (pocf + picf) if (pocf is not None and picf is not None) else None
+    out["prior"] = prior
+    return out
+
+
+def _prior_period_end(report) -> str | None:
+    raw = getattr(report, "raw_fields", None) or {}
+    v = raw.get("jpdei_cor:ComparativePeriodEndDateDEI")
+    return str(v) if v else None
+
+
+def _probe_interim_doc(edinet_code: str, max_back_days: int = _INTERIM_MAX_BACK_DAYS):
+    """今日から遡って該当法人の最新 半期報告書 (160) を探す。早期終了。"""
+    import edinet_tools
+
+    today = date.today()
+    for back in range(0, max_back_days + 1):
+        d = today - timedelta(days=back)
+        try:
+            docs = edinet_tools.documents(date=d.isoformat(), doc_type=_INTERIM_DOC_TYPE)
+        except Exception as e:
+            logger.warning("EDINET interim documents(%s) failed: %s", d, e)
+            continue
+        for doc in docs or []:
+            if getattr(doc, "filer_edinet_code", None) == edinet_code:
+                return doc, d
+    return None
+
+
+def get_latest_interim_for_ticker(ticker: str, refresh: bool = False) -> dict | None:
+    """最新の半期報告書から当中間期の連結実績を返す (なければ None)。
+
+    通年有報 (get_line_items_*) より新しい「最新四半期/半期の実績」を提供する。
+    結果は interim_items テーブルに永続化 (年次履歴とは分離)。期末が
+    _INTERIM_STALE_DAYS より新しければキャッシュをそのまま返す。
+    """
+    cached = filings_store.load_latest_interim(ticker)
+    if cached and not refresh:
+        pe = cached.get("report_period")
+        try:
+            fresh = pe and (date.today() - date.fromisoformat(pe)).days <= _INTERIM_STALE_DAYS
+        except ValueError:
+            fresh = False
+        if fresh:
+            logger.info("interim cache hit for %s (period=%s)", ticker, pe)
+            return cached
+
+    if not _has_api_key():
+        logger.warning("EDINET_API_KEY not set — get_latest_interim skipped.")
+        return cached
+
+    edinet_code = _EDINET_CODES.get(ticker)
+    if not edinet_code:
+        try:
+            import edinet_tools
+            entity = edinet_tools.entity(ticker)
+            edinet_code = getattr(entity, "edinet_code", None)
+        except Exception as e:
+            logger.warning("%s: EDINET entity 解決失敗: %s", ticker, e)
+            return cached
+    if not edinet_code:
+        return cached
+
+    hit = _probe_interim_doc(str(edinet_code))
+    if hit is None:
+        logger.info("%s: 半期報告書 (160) が直近 %d 日に見つからない", ticker, _INTERIM_MAX_BACK_DAYS)
+        return cached
+    doc, _submitted = hit
+    try:
+        report = doc.parse()
+    except Exception as e:
+        logger.warning("%s: 半期報告書 parse 失敗 docID=%s: %s", ticker, getattr(doc, "doc_id", "?"), e)
+        return cached
+
+    payload = _extract_interim(report)
+    try:
+        filings_store.save_interim_items(ticker, str(doc.doc_id), payload)
+    except Exception as e:
+        logger.warning("%s: interim payload 保存失敗: %s", ticker, e)
+    return payload
+
+
+def build_interim_report(ticker: str, payload: dict) -> str:
+    """中間決算 payload から当期 vs 前年同期 (YoY) の Markdown を作る (pure)。"""
+    pt = {"HY": "中間期(上期)", "Q1": "第1四半期", "Q2": "第2四半期(中間)",
+          "Q3": "第3四半期"}.get(payload.get("period_type") or "", payload.get("period_type") or "中間期")
+    lines = [
+        f"# 最新中間決算 — {ticker} ({pt})",
+        "",
+        f"期間: {payload.get('period_start', '?')} 〜 {payload.get('report_period', '?')} "
+        f"(通期末 {payload.get('fiscal_year_end', '?')})。出所: EDINET 半期報告書 XBRL。",
+        "単位: 億円。損益・CF は期初からの累計。⚠ 通年ではなく中間累計値である点に注意。",
+        "",
+        "| 項目 | 当中間期 | 前年同期 | YoY |",
+        "|---|---|---|---|",
+    ]
+    prior = payload.get("prior") or {}
+
+    def _oku(v) -> str:
+        return f"{v / 1e8:,.0f}" if v is not None else "—"
+
+    def _yoy(cur, pri) -> str:
+        if cur is None or pri in (None, 0):
+            return "—"
+        return f"{(cur - pri) / abs(pri) * 100:+.1f}%"
+
+    rows = [
+        ("売上高", "revenue"),
+        ("営業利益", "operating_income"),
+        ("純利益(親会社株主)", "net_income"),
+        ("営業CF", "operating_cf"),
+        ("投資CF", "investing_cf"),
+        ("FCF", "free_cash_flow"),
+    ]
+    for label, key in rows:
+        cur, pri = payload.get(key), prior.get(key)
+        lines.append(f"| {label} | {_oku(cur)} | {_oku(pri)} | {_yoy(cur, pri)} |")
+
+    er = payload.get("equity_ratio_pct")
+    lines += [
+        "",
+        f"期末BS ({payload.get('report_period', '?')}): "
+        f"総資産 {_oku(payload.get('total_assets'))}億 / 純資産 {_oku(payload.get('net_assets'))}億 "
+        f"/ 自己資本比率 {er if er is not None else '—'}%",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # 有報 PDF download (qualitative sections: 経営方針 / リスク / MD&A)
 # ---------------------------------------------------------------------------
 
