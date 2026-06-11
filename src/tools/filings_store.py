@@ -175,7 +175,11 @@ def save_line_items(ticker: str, doc_id: str, payload: dict) -> None:
 
 
 def load_line_items(ticker: str, max_age_days: int = 30) -> dict | None:
-    """Return the freshest cached line-items payload for a ticker, or None.
+    """Return the latest fiscal-period line-items payload for a ticker, or None.
+
+    「最新の会計期」で選ぶ (取得時刻順ではない)。get_line_items_history が過去期を
+    後から保存すると最古の期が最新 fetched_at になるため、fetched_at DESC で引くと
+    古い期 (例: 2016-09-30) を掴んでしまう。period DESC を主キーに据えて最新期を返す。
 
     max_age_days bounds how long we trust the cache before re-checking EDINET
     for a newer filing (annual reports appear ~once a year, so 30 days is
@@ -188,7 +192,7 @@ def load_line_items(ticker: str, max_age_days: int = 30) -> dict | None:
             SELECT payload FROM line_items
             WHERE ticker = ? AND fetched_at >= ?
               AND doc_id NOT LIKE '\_\_%' ESCAPE '\'   -- 内部マーカー行を除外
-            ORDER BY fetched_at DESC LIMIT 1
+            ORDER BY period DESC, fetched_at DESC LIMIT 1
             """,
             (ticker, cutoff),
         ).fetchone()

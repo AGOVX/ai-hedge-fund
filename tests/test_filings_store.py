@@ -80,6 +80,23 @@ class TestLineItems:
         filings_store.save_line_items("4751", "DOC1", {"revenue": 2.0, "report_period": None})
         assert filings_store.load_line_items("4751")["revenue"] == 2.0
 
+    def test_latest_period_not_latest_fetched(self):
+        # 回帰: --history が過去期を後から保存すると最古期が最新 fetched_at になる。
+        # 最新期 (2025-09-30) を先に、過去期を後に保存しても、最新会計期を返すこと。
+        filings_store.save_line_items("4751", "NEW", {"revenue": 874.0, "report_period": "2025-09-30"})
+        time.sleep(0.01)
+        filings_store.save_line_items("4751", "OLD", {"revenue": 311.0, "report_period": "2016-09-30"})
+        out = filings_store.load_line_items("4751")
+        assert out["report_period"] == "2025-09-30"
+        assert out["revenue"] == 874.0
+
+    def test_real_period_beats_null_period(self):
+        # report_period 不明 (NULL) の行より、期末日のある行を優先する
+        filings_store.save_line_items("4751", "DATED", {"revenue": 874.0, "report_period": "2025-09-30"})
+        time.sleep(0.01)
+        filings_store.save_line_items("4751", "UNDATED", {"revenue": 1.0, "report_period": None})
+        assert filings_store.load_line_items("4751")["report_period"] == "2025-09-30"
+
 
 class TestLineItemsHistory:
     def test_history_sorted_desc_no_ttl(self):

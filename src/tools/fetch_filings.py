@@ -21,6 +21,10 @@ from src.tools.common import utf8_stdout
 
 utf8_stdout()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+# edinet_tools は最新有報の探索や --history の周年プローブで日付を1日ずつ叩き、
+# その都度 INFO を吐く。10年スキャンでは数百行に達して結果行が stdout 切り捨てで
+# 埋もれるため、ライブラリ側のログは WARNING 以上に抑える (リトライ・失敗は残る)。
+logging.getLogger("edinet_tools").setLevel(logging.WARNING)
 
 _BUFFETT_ITEMS = [
     "capital_expenditure",
