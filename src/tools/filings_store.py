@@ -55,17 +55,23 @@ CREATE TABLE IF NOT EXISTS line_items (
     PRIMARY KEY (ticker, doc_id)
 );
 CREATE TABLE IF NOT EXISTS interim_items (
-    -- 半期/四半期 (160/140) の中間決算。年次 line_items とは分離して保存し、
-    -- --history の通年 ROE 系列に半期値が混入するのを防ぐ。
+    -- 中間決算 (EDINET半期160 / TDnet短信XBRL)。年次 line_items とは分離して
+    -- 保存し、--history の通年 ROE 系列に半期値が混入するのを防ぐ。
     ticker      TEXT NOT NULL,
     doc_id      TEXT NOT NULL,
     period      TEXT,                     -- 中間期末 (YYYY-MM-DD)
-    period_type TEXT,                     -- 'HY' | 'Q1' | 'Q2' | 'Q3' など
+    period_type TEXT,                     -- 'HY' | 'Q1' | 'Q2' | 'Q3' | 'FY'
+    source      TEXT,                     -- 'edinet' | 'tdnet'
     payload     TEXT NOT NULL,            -- JSON dict (当期 + 前年同期 + メタ)
     fetched_at  TEXT NOT NULL,
     PRIMARY KEY (ticker, doc_id)
 );
 """
+
+# 旧 DB (source 列なし) 向けの後付けマイグレーション
+_MIGRATIONS = (
+    "ALTER TABLE interim_items ADD COLUMN source TEXT",
+)
 
 
 def filings_dir() -> Path:
@@ -87,6 +93,11 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(filings_dir() / "filings.db")
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass  # 既に適用済み (列が存在)
     return conn
 
 
@@ -263,38 +274,39 @@ def load_line_items_by_doc(ticker: str, doc_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def save_interim_items(ticker: str, doc_id: str, payload: dict) -> None:
-    """半期/四半期の中間決算 payload を保存 (年次履歴を汚さない)。"""
+    """中間決算 payload を保存 (年次履歴を汚さない)。source は payload から。"""
     with closing(_connect()) as conn, conn:
         conn.execute(
             """
-            INSERT INTO interim_items (ticker, doc_id, period, period_type, payload, fetched_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO interim_items (ticker, doc_id, period, period_type, source, payload, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (ticker, doc_id) DO UPDATE SET
                 payload    = excluded.payload,
                 period     = excluded.period,
                 period_type = excluded.period_type,
+                source     = excluded.source,
                 fetched_at = excluded.fetched_at
             """,
-            (ticker, doc_id, payload.get("report_period"),
-             payload.get("period_type"), json.dumps(payload), _now_iso()),
+            (ticker, doc_id, payload.get("report_period"), payload.get("period_type"),
+             payload.get("source"), json.dumps(payload), _now_iso()),
         )
 
 
-def load_latest_interim(ticker: str) -> dict | None:
+def load_latest_interim(ticker: str, source: str | None = None) -> dict | None:
     """最新の中間期 (period 降順) の payload を返す。なければ None。TTL なし。
 
-    中間決算ドキュメントは不変なので TTL は持たない。新しい四半期の発見は
-    呼び出し側 (edinet) が period_end の鮮度を見て再プローブするか判断する。
+    source を指定すると 'edinet' / 'tdnet' のいずれかに絞る (両ソースが同一期を
+    持つときのキャッシュ衝突を避けるため)。中間決算ドキュメントは不変なので
+    TTL は持たず、新しい四半期の発見は呼び出し側が period_end の鮮度で判断する。
     """
+    q = "SELECT payload FROM interim_items WHERE ticker = ?"
+    params: list = [ticker]
+    if source:
+        q += " AND source = ?"
+        params.append(source)
+    q += " ORDER BY period DESC, fetched_at DESC LIMIT 1"
     with closing(_connect()) as conn:
-        row = conn.execute(
-            """
-            SELECT payload FROM interim_items
-            WHERE ticker = ?
-            ORDER BY period DESC, fetched_at DESC LIMIT 1
-            """,
-            (ticker,),
-        ).fetchone()
+        row = conn.execute(q, params).fetchone()
     if row is None:
         return None
     try:

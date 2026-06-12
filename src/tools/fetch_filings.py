@@ -52,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="過去 N 期分 (既定10) の財務時系列を取得・表示 (EDINET, 要キー)")
     p.add_argument("--interim", action="store_true",
                    help="最新の中間決算 (半期報告書, 当期 vs 前年同期) を取得・表示 (EDINET, 要キー)")
+    p.add_argument("--quarter", action="store_true",
+                   help="最新の四半期決算 (TDnet短信サマリーXBRL, Q1〜Q4 全対応, キー不要)")
     p.add_argument("--list", action="store_true", help="キャッシュ済みドキュメント一覧を表示")
     args = p.parse_args(argv)
 
@@ -68,11 +70,19 @@ def main(argv: list[str] | None = None) -> int:
     if not args.tickers:
         p.error("ticker を指定してください (または --list)")
 
-    do_all = not (args.tanshin or args.yuho or args.items or args.history or args.interim)
+    do_all = not (args.tanshin or args.yuho or args.items or args.history or args.interim or args.quarter)
     failures = 0
 
     for ticker in args.tickers:
         print(f"=== {ticker} ===")
+        if args.quarter:
+            from src.tools import tdnet_xbrl
+            payload = tdnet_xbrl.fetch_latest_quarter(ticker)
+            if payload and payload.get("report_period"):
+                print(tdnet_xbrl.build_quarter_report(ticker, payload))
+            else:
+                print("  四半期決算 : 取得失敗 (短信XBRLなし / 期限切れ>31日?)")
+                failures += 1
         if args.history:
             rows = edinet.get_line_items_history(ticker, _BUFFETT_ITEMS, periods=args.history)
             if rows:
