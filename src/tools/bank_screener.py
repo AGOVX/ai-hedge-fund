@@ -50,6 +50,7 @@ from src.tools.screener import (
     _PRIME_LABEL,
     _batch_closes,
     _fetch_info_with_retry,
+    _to_float,
     dividend_yield_pct,
     effective_per,
 )
@@ -239,9 +240,10 @@ def fetch_bank_metrics(tickers: list[dict]) -> tuple[list[dict], dict]:
     for n, (sym, price) in enumerate(closes.items(), 1):
         meta = by_symbol[sym]
         info = _fetch_info_with_retry(sym)
-        roe = info.get("returnOnEquity")
-        roa = info.get("returnOnAssets")
-        if info.get("priceToBook") is not None or roe is not None:
+        roe = _to_float(info.get("returnOnEquity"))
+        roa = _to_float(info.get("returnOnAssets"))
+        pbr = _to_float(info.get("priceToBook"))
+        if pbr is not None or roe is not None:
             info_ok += 1
         rows.append({
             "ticker": meta["ticker"],
@@ -249,11 +251,11 @@ def fetch_bank_metrics(tickers: list[dict]) -> tuple[list[dict], dict]:
             "sector33": meta["sector33"],
             "price": price,
             "per": effective_per(info),
-            "pbr": info.get("priceToBook"),
-            "roe_pct": round(float(roe) * 100, 1) if roe is not None else None,
-            "roa_pct": round(float(roa) * 100, 2) if roa is not None else None,
+            "pbr": pbr,
+            "roe_pct": round(roe * 100, 1) if roe is not None else None,
+            "roa_pct": round(roa * 100, 2) if roa is not None else None,
             "dividend_yield_pct": dividend_yield_pct(info, price),
-            "market_cap": info.get("marketCap"),
+            "market_cap": _to_float(info.get("marketCap")),
         })
         if n % 20 == 0:
             logger.info("Stage 2: %d/%d ...", n, len(closes))

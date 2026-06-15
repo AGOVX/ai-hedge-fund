@@ -148,15 +148,27 @@ def value_score(metrics: dict) -> float | None:
     return round(sum(scores) / len(scores), 1) if scores else None
 
 
+def _to_float(v) -> float | None:
+    """yfinance .info は稀に数値を文字列('N/A'含む)で返すため安全に float 化する。"""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None  # NaN を弾く
+
+
 def effective_per(info: dict) -> float | None:
     """trailingPE。赤字企業は yfinance が PE を None で返すため、EPS<0 を検知して
     -1.0 (= value_score で素点0) に落とす — 赤字銘柄が PER ペナルティを素通りして
     PBR/配当だけで満点を取るのを防ぐ。EPS も不明なら None (データ欠落扱い)。
+    文字列で返るケースがあるため _to_float で正規化する。
     """
-    per = info.get("trailingPE")
+    per = _to_float(info.get("trailingPE"))
     if per is not None:
         return per
-    eps = info.get("trailingEps")
+    eps = _to_float(info.get("trailingEps"))
     if eps is not None and eps < 0:
         return -1.0
     return None
@@ -170,11 +182,11 @@ def dividend_yield_pct(info: dict, price: float | None) -> float | None:
     規約。旧来の「<1 なら ×100」ヒューリスティックは実利回り 1% 未満の銘柄を
     100 倍に誤変換するため廃止)。
     """
-    rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate")
+    rate = _to_float(info.get("dividendRate") or info.get("trailingAnnualDividendRate"))
     if rate and price:
         return round(rate / price * 100, 2)
-    dy = info.get("dividendYield")
-    return round(float(dy), 2) if dy is not None else None
+    dy = _to_float(info.get("dividendYield"))
+    return round(dy, 2) if dy is not None else None
 
 
 def apply_filters(rows: list[dict], capital: int, market_cap_min: float) -> list[dict]:
@@ -396,9 +408,9 @@ def fetch_metrics(tickers: list[dict], capital: int) -> tuple[list[dict], dict]:
                 "sector33": meta["sector33"],
                 "price": price,
                 "per": effective_per(info),
-                "pbr": info.get("priceToBook"),
+                "pbr": _to_float(info.get("priceToBook")),
                 "dividend_yield_pct": dividend_yield_pct(info, price),
-                "market_cap": info.get("marketCap"),
+                "market_cap": _to_float(info.get("marketCap")),
             }
         )
         if n % 20 == 0:
@@ -528,8 +540,13 @@ if __name__ == "__main__":
     ap.add_argument("--refresh-universe", action="store_true", help="JPX 上場一覧を再取得")
     ap.add_argument("--capital", type=int, default=_DEFAULT_CAPITAL, help="想定総資本 (円)")
     ap.add_argument("--top", type=int, default=15, help="表示件数")
+    ap.add_argument("--lot-ratio", type=float, default=_LOT_RATIO_MAX,
+                    help="最低売買単位/総資本 の上限 (既定0.10。攻め方針は0.15)")
     ap.add_argument("--no-quality", action="store_true", help="質的足切り (Stage 3) をスキップ")
     args = ap.parse_args()
+
+    _LOT_RATIO_MAX = args.lot_ratio  # noqa: F811 — CLI override (lot_filter はモジュールグローバルを参照)
+    globals()["_LOT_RATIO_MAX"] = args.lot_ratio
 
     if args.refresh_universe:
         refresh_universe()
