@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 _JPX_XLS_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
 _PRIME_LABEL = "プライム"
-_DEFAULT_CAPITAL = 500_000
+_DEFAULT_CAPITAL = 1_991_043  # 実総資本 (real-holdings.yaml)。旧¥500k想定は2026-06-14廃止
 _LOT_SIZE = 100
 _LOT_RATIO_MAX = 0.10  # 最低売買単位 ≤ 総資本の10%
 
