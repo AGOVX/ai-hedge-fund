@@ -539,6 +539,7 @@ def _extract_interim(report) -> dict:
     out: dict = {}
     pe = getattr(report, "period_end", None)
     ps = getattr(report, "period_start", None)
+    out["source"] = "edinet"
     out["report_period"] = pe.isoformat() if pe else None
     out["period_start"] = ps.isoformat() if ps else None
     out["currency"] = "JPY"
@@ -607,7 +608,7 @@ def get_latest_interim_for_ticker(ticker: str, refresh: bool = False) -> dict | 
     結果は interim_items テーブルに永続化 (年次履歴とは分離)。期末が
     _INTERIM_STALE_DAYS より新しければキャッシュをそのまま返す。
     """
-    cached = filings_store.load_latest_interim(ticker)
+    cached = filings_store.load_latest_interim(ticker, source="edinet")
     if cached and not refresh:
         pe = cached.get("report_period")
         try:

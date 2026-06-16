@@ -61,6 +61,7 @@ def list_disclosures(ticker: str, limit: int = 30) -> list[dict]:
                 "doc_id": Path(doc_url).stem or td.get("id", ""),
                 "title": td.get("title", ""),
                 "url": doc_url,
+                "url_xbrl": td.get("url_xbrl") or "",  # 短信サマリー XBRL zip (あれば)
                 "pubdate": td.get("pubdate", ""),
                 "company_code": company_code,
             }

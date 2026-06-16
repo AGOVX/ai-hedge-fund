@@ -147,6 +147,7 @@ def build_report(
     technicals_by_ticker: dict,
     disclosures_by_ticker: dict[str, list[dict]],
     earnings_by_ticker: dict[str, dict] | None = None,
+    quarter_by_ticker: dict[str, dict] | None = None,
 ) -> str:
     lines = [
         f"# Watch List 自動点検レポート — {today.isoformat()}",
@@ -191,6 +192,15 @@ def build_report(
                 lines.append(
                     f"- 次回決算発表: {einfo['date']} ({einfo['source']}, あと{einfo['days_to']}日)"
                 )
+
+        # 1.6 latest quarterly results (TDnet 短信サマリー XBRL)
+        qinfo = (quarter_by_ticker or {}).get(ticker)
+        if qinfo:
+            from src.tools.tdnet_xbrl import quarter_summary_line
+
+            qline = quarter_summary_line(qinfo)
+            if qline:
+                lines.append(f"- 📊 {qline}")
 
         # 2. technicals
         tech = technicals_by_ticker.get(ticker)
@@ -242,11 +252,13 @@ def run(no_net: bool = False, today: date | None = None) -> Path:
     technicals_by_ticker: dict = {}
     disclosures_by_ticker: dict[str, list[dict]] = {}
     earnings_by_ticker: dict[str, dict] = {}
+    quarter_by_ticker: dict[str, dict] = {}
 
     if not no_net:
         from src.tools.earnings import resolve_earnings_date
-        from src.tools.technicals import get_technicals
         from src.tools.tdnet import list_disclosures
+        from src.tools.tdnet_xbrl import fetch_latest_quarter
+        from src.tools.technicals import get_technicals
 
         for e in entries:
             ticker = str(e.get("ticker", ""))
@@ -255,8 +267,16 @@ def run(no_net: bool = False, today: date | None = None) -> Path:
             technicals_by_ticker[ticker] = get_technicals(ticker)
             disclosures_by_ticker[ticker] = list_disclosures(ticker, limit=30)
             earnings_by_ticker[ticker] = resolve_earnings_date(e, today)
+            # 最新四半期を鮮度のあるうちに取得・永続化 (TDnet は約31日で消える)
+            try:
+                q = fetch_latest_quarter(ticker)
+                if q:
+                    quarter_by_ticker[ticker] = q
+            except Exception as ex:
+                logger.warning("%s: 四半期取得スキップ: %s", ticker, ex)
 
-    report = build_report(entries, today, technicals_by_ticker, disclosures_by_ticker, earnings_by_ticker)
+    report = build_report(entries, today, technicals_by_ticker, disclosures_by_ticker,
+                          earnings_by_ticker, quarter_by_ticker)
     return write_report(f"watchlist-check-{today.strftime('%Y%m%d')}.md", report)
 
 

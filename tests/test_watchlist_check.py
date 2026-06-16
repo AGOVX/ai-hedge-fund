@@ -161,6 +161,20 @@ class TestBuildReport:
         assert "次回決算発表" not in report
         assert "8001 伊藤忠商事" in report
 
+    def test_quarter_line_shown(self):
+        entries = [{"ticker": "4751", "name": "サイバーエージェント", "status": "watch",
+                    "next_review_due": "2026-07-30"}]
+        quarter = {"4751": {"report_period": "2026-03-31", "period_type": "Q2",
+                            "revenue": 4786e8, "net_income": 273e8,
+                            "operating_income": 525e8,
+                            "prior": {"revenue": 4212e8, "net_income": 159e8},
+                            "forecast_fy": {"operating_income": 500e8}}}
+        report = build_report(entries, TODAY, {"4751": _tech(ticker="4751")}, {"4751": []},
+                              None, quarter)
+        assert "最新決算 Q2(中間) (2026-03-31)" in report
+        assert "売上+13.6%" in report
+        assert "通期営業益進捗 105%" in report or "通期営業益進捗105%" in report
+
     def test_dma200_none_shows_na(self):
         # 履歴200日未満 (above_dma200 is None) は「下」扱いせず n/a 表示
         entries = [{"ticker": "9999", "name": "新規上場", "status": "watch",

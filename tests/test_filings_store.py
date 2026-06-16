@@ -146,6 +146,19 @@ class TestInterimItems:
     def test_unknown_ticker(self):
         assert filings_store.load_latest_interim("0000") is None
 
+    def test_source_filter_avoids_collision(self):
+        # 同一期を edinet と tdnet が持つとき、source 指定で取り違えない
+        filings_store.save_interim_items(
+            "4751", "EDI", {"report_period": "2026-03-31", "source": "edinet", "revenue": 1.0}
+        )
+        filings_store.save_interim_items(
+            "4751", "TSE", {"report_period": "2026-03-31", "source": "tdnet", "revenue": 2.0}
+        )
+        assert filings_store.load_latest_interim("4751", source="edinet")["revenue"] == 1.0
+        assert filings_store.load_latest_interim("4751", source="tdnet")["revenue"] == 2.0
+        # source 無指定はどちらか1件 (最新 fetched) を返す
+        assert filings_store.load_latest_interim("4751")["report_period"] == "2026-03-31"
+
     def test_isolated_from_line_items(self):
         # 中間データは年次 line_items / history を一切汚染しない
         filings_store.save_interim_items("4751", "DOCH1", {"report_period": "2026-03-31", "revenue": 1.0})
